@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -56,6 +57,7 @@ INCASSET(ico_launcher_home, "icons/launcher-home.jpg");
 INCASSET(ico_owner_avatar, "icons/x-f1reball-x.jpg");
 
 static int send_blob(int c, const char *ctype, const void *body, size_t n);
+static void evlog(const char *kind, const char *fmt, ...);
 
 /* ---- APP_VERSION of this build (embedded webapp) and of the mirror copy ----
  * A launcher sent straight to elfldr (:9021) only lives in RAM; boot loaders
@@ -322,7 +324,9 @@ static int install_home_icon(void) {
   InstallDir = (void *)kernel_dynlib_resolve(-1, ah, NID_InstallTitleDir);
   UnInstall = (void *)kernel_dynlib_resolve(-1, ah, NID_AppUnInstall);
   if (!Init || !InstallDir) {
-    TILE_FAIL("AppInstUtil functions not found");
+    TILE_FAIL("AppInstUtil lookup: Initialize=%s AppInstallTitleDir=%s",
+              Init ? "found" : "missing",
+              InstallDir ? "found" : "missing");
     return -3;
   }
   err = Init();
@@ -969,9 +973,15 @@ static void start_fresh_browser(void) {
 }
 
 #define OPEN_AFTER_JB_PATH "/data/elf-launcher/open-after-jb"
+#define SETTINGS_FILE "/data/elf-launcher/settings.json"
 #define WKAL_MARK_PATH "/data/elf-launcher/from-wkal"
-#define TAKEOVER_MARK_PATH "/data/elf-launcher/update-takeover"
+/* A self-update hand-off is meaningful only within this boot. A persistent
+ * uptime stamp could otherwise suppress the browser after a later reboot. */
+#define TAKEOVER_MARK_PATH "/system_tmp/elf-launcher-update-takeover"
 #define BOOT_AUTO_DONE_PATH "/data/elf-launcher/boot-auto-done"
+static int write_atomic_under_data(const char *final_path, const uint8_t *data,
+                                  size_t len);
+static int settings_open_after_jb(int *open_flag);
 
 static int64_t mono_secs(void) {
   struct timespec ts;
@@ -980,49 +990,13 @@ static int64_t mono_secs(void) {
   return (int64_t)ts.tv_sec;
 }
 
-static void clear_boot_auto_done(void) { unlink(BOOT_AUTO_DONE_PATH); }
-
-/* Stamp is CLOCK_MONOTONIC seconds. After reboot the clock restarts near 0, so
- * a stamp larger than "now" is from the previous boot and AutoPayload may run
- * once again. */
-static int boot_auto_done(void) {
-  FILE *f;
-  long long stamped = 0;
-  int64_t now;
-  f = fopen(BOOT_AUTO_DONE_PATH, "r");
-  if (!f)
-    return 0;
-  if (fscanf(f, "%lld", &stamped) != 1) {
-    fclose(f);
-    unlink(BOOT_AUTO_DONE_PATH);
-    return 0;
-  }
-  fclose(f);
-  now = mono_secs();
-  if (stamped < 0 || (int64_t)stamped > now) {
-    unlink(BOOT_AUTO_DONE_PATH);
-    return 0;
-  }
-  return 1;
-}
-
-static int write_boot_auto_done(void) {
-  FILE *f;
-  mkdir("/data", 0755);
-  if (mkdir("/data/elf-launcher", 0755) && errno != EEXIST)
-    return -1;
-  f = fopen(BOOT_AUTO_DONE_PATH, "w");
-  if (!f)
-    return -1;
-  fprintf(f, "%lld\n", (long long)mono_secs());
-  fclose(f);
-  return 0;
-}
-
 /* Missing file means closed. Only a file whose first byte is 1 opens the browser. */
 static int open_after_jb(void) {
   FILE *f;
   int c;
+  int setting;
+  if (!settings_open_after_jb(&setting))
+    return setting;
   f = fopen(OPEN_AFTER_JB_PATH, "r");
   if (!f)
     return 0;
@@ -1032,17 +1006,9 @@ static int open_after_jb(void) {
 }
 
 static int write_open_after_jb(int open_flag) {
-  FILE *f;
-  mkdir("/data", 0755);
-  if (mkdir("/data/elf-launcher", 0755) && errno != EEXIST)
-    return -1;
-  f = fopen(OPEN_AFTER_JB_PATH, "w");
-  if (!f)
-    return -1;
-  fputc(open_flag ? '1' : '0', f);
-  fputc('\n', f);
-  fclose(f);
-  return 0;
+  char value[2] = {open_flag ? '1' : '0', '\n'};
+  return write_atomic_under_data(OPEN_AFTER_JB_PATH, (const uint8_t *)value,
+                                 sizeof(value));
 }
 
 /* WK Autoloader sends wkal-mark.elf before elf-launcher.elf. A manual
@@ -1165,6 +1131,10 @@ static int storage_scanned;
 static int storage_open_flag = -1;
 static char storage_names[AUTO_MAX][AUTO_NAME_MAX];
 static int storage_name_count;
+static pthread_mutex_t auto_list_mx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t profiles_mx = PTHREAD_MUTEX_INITIALIZER;
+static int write_auto_pair_unlocked(char names[][AUTO_NAME_MAX], int count,
+                                    const char *serialized, size_t len);
 
 static int auto_skip_name(const char *base) {
   if (!base || !base[0])
@@ -1177,65 +1147,130 @@ static int auto_skip_name(const char *base) {
   return 0;
 }
 
-static void add_auto_name(char names[][AUTO_NAME_MAX], int *n, int cap,
-                          const char *raw) {
+static int add_auto_name_checked(char names[][AUTO_NAME_MAX], int *n, int cap,
+                                 const char *raw, const char **why) {
   char base[AUTO_NAME_MAX];
   const char *s;
   const char *bs;
   size_t len;
   int i;
   char dest[512];
-  if (!raw || !n || *n >= cap)
-    return;
+  if (why)
+    *why = "invalid entry";
+  if (!raw || !n)
+    return 0;
+  if (!raw[0]) {
+    if (why)
+      *why = "empty entry";
+    return 0;
+  }
+  if (*n >= cap) {
+    if (why)
+      *why = "queue limit reached";
+    return 0;
+  }
   s = strrchr(raw, '/');
   s = s ? s + 1 : raw;
   bs = strrchr(s, '\\');
   if (bs)
     s = bs + 1;
   len = strlen(s);
-  if (len < 5 || len >= sizeof(base))
-    return;
-  if (strcmp(s + len - 4, ".elf") != 0)
-    return;
+  if (len < 5 || len >= sizeof(base)) {
+    if (why)
+      *why = "invalid filename length";
+    return 0;
+  }
+  if (strcmp(s + len - 4, ".elf") != 0) {
+    if (why)
+      *why = "filename does not end in .elf";
+    return 0;
+  }
   memcpy(base, s, len + 1);
-  if (auto_skip_name(base))
-    return;
-  if (mirror_disk(base, dest, sizeof(dest)))
-    return;
+  if (auto_skip_name(base)) {
+    if (why)
+      *why = "reserved launcher filename";
+    return 0;
+  }
+  if (mirror_disk(base, dest, sizeof(dest))) {
+    if (why)
+      *why = "invalid filename or path";
+    return 0;
+  }
   for (i = 0; i < *n; i++) {
-    if (!strcmp(names[i], base))
-      return;
+    if (!strcmp(names[i], base)) {
+      if (why)
+        *why = "duplicate filename";
+      return 0;
+    }
   }
   memcpy(names[*n], base, len + 1);
   (*n)++;
+  if (why)
+    *why = "recognized";
+  return 1;
 }
 
-static int auto_disk_path(const char *base, char *out, size_t outsz) {
+static void add_auto_name(char names[][AUTO_NAME_MAX], int *n, int cap,
+                          const char *raw) {
+  (void)add_auto_name_checked(names, n, cap, raw, NULL);
+}
+
+static int auto_disk_path_reason(const char *base, char *out, size_t outsz,
+                                 const char **why) {
   char mirror[512];
-  if (mirror_disk(base, mirror, sizeof(mirror)))
+  int mirror_exists, mirror_readable, mirror_bad_elf = 0;
+  int fallback_exists, fallback_readable, fallback_bad_elf = 0;
+  if (why)
+    *why = "file missing";
+  if (mirror_disk(base, mirror, sizeof(mirror))) {
+    if (why)
+      *why = "invalid filename or path";
     return -1;
-  if (!access(mirror, R_OK) && file_is_elf(mirror)) {
-    if (strlen(mirror) + 1 > outsz)
-      return -1;
-    memcpy(out, mirror, strlen(mirror) + 1);
-    return 0;
   }
-  if (snprintf(out, outsz, "/data/elf-launcher/%s", base) >= (int)outsz)
+  mirror_exists = access(mirror, F_OK) == 0;
+  mirror_readable = access(mirror, R_OK) == 0;
+  if (mirror_readable) {
+    if (file_is_elf(mirror)) {
+      if (strlen(mirror) + 1 > outsz) {
+        if (why)
+          *why = "output path buffer too small";
+        return -1;
+      }
+      memcpy(out, mirror, strlen(mirror) + 1);
+      return 0;
+    }
+    mirror_bad_elf = 1;
+  }
+  if (snprintf(out, outsz, "/data/elf-launcher/%s", base) >= (int)outsz) {
+    if (why)
+      *why = "output path buffer too small";
     return -1;
-  if (!access(out, R_OK) && file_is_elf(out))
-    return 0;
+  }
+  fallback_exists = access(out, F_OK) == 0;
+  fallback_readable = access(out, R_OK) == 0;
+  if (fallback_readable) {
+    if (file_is_elf(out))
+      return 0;
+    fallback_bad_elf = 1;
+  }
+  if (why) {
+    if (mirror_bad_elf || fallback_bad_elf)
+      *why = "invalid ELF magic or unreadable ELF header";
+    else if (mirror_exists || fallback_exists)
+      *why = "file exists but is not readable";
+    else
+      *why = "file missing from mirror and launcher directory";
+  }
   return -1;
 }
 
-static int write_auto_names(const char *list) {
+static int write_auto_names_unlocked(const char *list) {
   char names[AUTO_MAX][AUTO_NAME_MAX];
+  char serialized[AUTO_MAX * (AUTO_NAME_MAX + 1)];
   int n = 0;
   const char *p = list ? list : "";
-  FILE *f;
   int i;
-  mkdir("/data", 0755);
-  if (mkdir("/data/elf-launcher", 0755) && errno != EEXIST)
-    return -1;
+  size_t used = 0;
   while (*p && n < AUTO_MAX) {
     char tok[AUTO_NAME_MAX];
     size_t k = 0;
@@ -1244,33 +1279,62 @@ static int write_auto_names(const char *list) {
     tok[k] = 0;
     if (*p)
       p++;
-    add_auto_name(names, &n, AUTO_MAX, tok);
+    if (!add_auto_name_checked(names, &n, AUTO_MAX, tok, NULL))
+      return -1; /* Never acknowledge a silently shortened selection. */
   }
-  f = fopen(AUTO_LIST_PATH, "w");
-  if (!f)
-    return -1;
+  if (*p) return -1;
   for (i = 0; i < n; i++) {
-    fputs(names[i], f);
-    fputc('\n', f);
+    size_t len = strlen(names[i]);
+    if (used + len + 1 > sizeof(serialized))
+      return -1;
+    memcpy(serialized + used, names[i], len);
+    used += len;
+    serialized[used++] = '\n';
   }
+  if (write_auto_pair_unlocked(names, n, serialized, used))
+    return -1;
+  return n;
+}
+
+static int read_auto_list_impl(char names[][AUTO_NAME_MAX], int cap,
+                               int diagnose) {
+  FILE *f = fopen(AUTO_LIST_PATH, "r");
+  char line[AUTO_NAME_MAX];
+  int n = 0, lines = 0;
+  if (!f) {
+    int open_errno = errno;
+    if (diagnose)
+      evlog("error", "AutoPayload auto.list open failed: errno=%d", open_errno);
+    return 0;
+  }
+  if (diagnose)
+    evlog("info", "AutoPayload reading %s", AUTO_LIST_PATH);
+  while (n < cap && fgets(line, sizeof(line), f)) {
+    size_t k = strlen(line);
+    const char *why = "not recognized";
+    int added;
+    lines++;
+    while (k && (line[k - 1] == '\n' || line[k - 1] == '\r'))
+      line[--k] = 0;
+    if (diagnose)
+      evlog("info", "AutoPayload auto.list line %d: %s", lines,
+            k ? line : "(blank)");
+    added = add_auto_name_checked(names, &n, cap, line, &why);
+    if (diagnose && !added)
+      evlog("error", "AutoPayload auto.list line %d ignored: %.96s (%s)",
+            lines, line, why);
+  }
+  if (diagnose && ferror(f))
+    evlog("error", "AutoPayload auto.list read error after %d lines", lines);
   fclose(f);
+  if (diagnose)
+    evlog("info", "AutoPayload auto.list summary: lines=%d recognized=%d",
+          lines, n);
   return n;
 }
 
 static int read_auto_list(char names[][AUTO_NAME_MAX], int cap) {
-  FILE *f = fopen(AUTO_LIST_PATH, "r");
-  char line[AUTO_NAME_MAX];
-  int n = 0;
-  if (!f)
-    return 0;
-  while (n < cap && fgets(line, sizeof(line), f)) {
-    size_t k = strlen(line);
-    while (k && (line[k - 1] == '\n' || line[k - 1] == '\r'))
-      line[--k] = 0;
-    add_auto_name(names, &n, cap, line);
-  }
-  fclose(f);
-  return n;
+  return read_auto_list_impl(names, cap, 0);
 }
 
 static void urldecode_inplace(char *s) {
@@ -1570,22 +1634,29 @@ static void scan_page_storage(void) {
 }
 
 static int wk_wants_open(void) {
-  if (!access(OPEN_AFTER_JB_PATH, R_OK))
+  if (!access(SETTINGS_FILE, R_OK) || !access(OPEN_AFTER_JB_PATH, R_OK))
     return open_after_jb();
   scan_page_storage();
   return storage_open_flag == 1;
 }
 
 static int existing_names(char in[][AUTO_NAME_MAX], int n,
-                          char out[][AUTO_NAME_MAX], int cap) {
+                          char out[][AUTO_NAME_MAX], int cap,
+                          const char *source) {
   int i, e = 0;
   char path[512];
+  const char *why;
   for (i = 0; i < n && e < cap; i++) {
-    if (auto_disk_path(in[i], path, sizeof(path)))
+    if (auto_disk_path_reason(in[i], path, sizeof(path), &why)) {
+      evlog("error", "AutoPayload invalid %s %.88s: %s", source, in[i], why);
       continue;
+    }
+    evlog("info", "AutoPayload valid %s %.64s path=%.86s", source, in[i], path);
     memcpy(out[e], in[i], AUTO_NAME_MAX);
     e++;
   }
+  evlog("info", "AutoPayload validation source=%s candidates=%d valid=%d",
+        source, n, e);
   return e;
 }
 
@@ -1794,8 +1865,8 @@ static int has_origin_or_referer(const char *hdrs, const char *end) {
          !hdr_get(hdrs, end, "Referer", v, sizeof(v));
 }
 
-static int is_mutating(const char *p, const char *qs) {
-  static const char *always[] = {"trigger-auto", "install-home", "file_delete",
+static int is_mutating(const char *p, const char *qs, int is_post) {
+  static const char *always[] = {"auto-cancel", "trigger-auto", "install-home", "file_delete",
                                  "update",       "process_kill", "relay",
                                  "run",          "upload",       "run_path",
                                  "save_path",    "self_update",  "power", "quit", 0};
@@ -1811,15 +1882,17 @@ static int is_mutating(const char *p, const char *qs) {
   if (!strcmp(p, "backup/save") || !strcmp(p, "events/add") || !strcmp(p, "events/clear"))
     return 1;
   if (!strcmp(p, "profiles"))
-    return 1;
+    return is_post;
+  if (!strcmp(p, "settings"))
+    return is_post;
   if (!qs)
-    return 0;
+    return is_post && (!strcmp(p, "auto-list") || !strcmp(p, "browser-pref"));
   if (!strcmp(p, "boot-auto") && strstr(qs, "done="))
     return 1;
   if (!strcmp(p, "browser-pref") && strstr(qs, "open="))
     return 1;
-  if (!strcmp(p, "auto-list") && strstr(qs, "names="))
-    return 1;
+  if (!strcmp(p, "auto-list"))
+    return is_post || strstr(qs, "names=") != NULL;
   return 0;
 }
 
@@ -1920,10 +1993,6 @@ static volatile int elfldr_starting;
 static int64_t elfldr_last_start;
 
 static int send_lock_try(void) { return !__sync_lock_test_and_set(&send_busy, 1); }
-static void send_lock_wait(void) {
-  while (__sync_lock_test_and_set(&send_busy, 1))
-    usleep(100000);
-}
 static void send_unlock(void) { __sync_lock_release(&send_busy); }
 
 /* Start the bundled loader once at a time, at most every few seconds. */
@@ -2151,29 +2220,44 @@ static int find_pid_by_name(const char *name) {
   return best;
 }
 
-static void add_to_auto_list(const char *base) {
+static int add_to_auto_list(const char *base) {
   char listed[AUTO_MAX][AUTO_NAME_MAX];
   char joined[AUTO_MAX * AUTO_NAME_MAX];
   size_t used = 0;
-  int n = read_auto_list(listed, AUTO_MAX), i;
+  int n, i, write_result;
+  pthread_mutex_lock(&profiles_mx);
+  pthread_mutex_lock(&auto_list_mx);
+  n = read_auto_list_impl(listed, AUTO_MAX, 0);
   joined[0] = 0;
   for (i = 0; i < n; i++) {
     size_t L = strlen(listed[i]);
-    if (!strcmp(listed[i], base))
-      return;
-    if (used + L + 2 >= sizeof(joined))
-      break;
+    if (!strcmp(listed[i], base)) {
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      return 0;
+    }
+    if (used + L + 2 >= sizeof(joined)) {
+      pthread_mutex_unlock(&auto_list_mx);pthread_mutex_unlock(&profiles_mx);return -1;
+    }
     if (used)
       joined[used++] = ',';
     memcpy(joined + used, listed[i], L + 1);
     used += L;
   }
-  if (used + strlen(base) + 2 < sizeof(joined)) {
+  if (n >= AUTO_MAX || used + strlen(base) + 2 >= sizeof(joined)) {
+    pthread_mutex_unlock(&auto_list_mx);pthread_mutex_unlock(&profiles_mx);return -1;
+  }
+  {
     if (used)
       joined[used++] = ',';
     snprintf(joined + used, sizeof(joined) - used, "%s", base);
   }
-  write_auto_names(joined);
+  write_result = write_auto_names_unlocked(joined);
+  pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+  if (write_result < 0)
+    evlog("error", "AutoPayload list update failed for %s", base ? base : "(null)");
+  return write_result < 0 ? -1 : 0;
 }
 
 /* ---- /browse and /run_path: only under these roots ---- */
@@ -3626,38 +3710,90 @@ static char *read_body(int c, const char *req, size_t hlen, size_t got, const ch
 
 /* ---- AutoPayload profiles: /data/elf-launcher/profiles.json ---- */
 #define PROFILES_FILE LAUNCHER_DIR "/profiles.json"
+static int file_revision_sha256(const char *path, size_t max_size,
+                                char revision[65]);
+static int read_file_bounded(const char *path, size_t max_size, char **data,
+                             size_t *len, int *exists);
+static int parse_auto_names_array(const char *body, size_t body_n,
+                                  char names[][AUTO_NAME_MAX], int *count,
+                                  const char **why);
+static int profiles_match_auto(const char *body, size_t len,
+                               char names[][AUTO_NAME_MAX], int count);
+static void handle_profiles_read(int c) {
+
+    char *buf, *out;
+    struct stat st;
+    size_t used = 0;
+    char revision[65], auto_revision[65], missing[256];
+    if (file_revision_sha256(AUTO_LIST_PATH,AUTO_MAX*(AUTO_NAME_MAX+1),auto_revision)) {
+      send_json_code(c,500,"{\"ok\":false,\"message\":\"could not read auto revision\"}");return;
+    }
+    int fd = open(PROFILES_FILE, O_RDONLY);
+    if (fd < 0) {
+      if (errno != ENOENT || file_revision_sha256(PROFILES_FILE, 65536, revision)) {
+        send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read profiles\"}");
+        return;
+      }
+      snprintf(missing,sizeof(missing),"{\"ok\":true,\"revision\":\"%s\",\"autoRevision\":\"%s\",\"profiles\":null}",revision,auto_revision);
+      send_json_code(c,200,missing);
+      return;
+    }
+    if (fstat(fd, &st) || st.st_size < 0 || st.st_size > 65536 ||
+        !(buf = malloc((size_t)st.st_size + 1))) {
+      close(fd);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"profiles file invalid or too large\"}");
+      return;
+    }
+    while (used < (size_t)st.st_size) {
+      ssize_t r = read(fd, buf + used, (size_t)st.st_size - used);
+      if (r < 0 && errno == EINTR)
+        continue;
+      if (r <= 0) {
+        free(buf);
+        close(fd);
+        send_json_code(c, 500, "{\"ok\":false,\"message\":\"incomplete profiles read\"}");
+        return;
+      }
+      used += (size_t)r;
+    }
+    close(fd);
+    buf[used] = 0;
+    sha256_hex((const uint8_t *)buf, used, revision);
+    out = malloc(used + 256);
+    if (out && used > 1 && buf[0] == '{') {
+      snprintf(out, used + 256, "{\"ok\":true,\"revision\":\"%s\",\"autoRevision\":\"%s\",\"profiles\":%s}",
+               revision, auto_revision, buf);
+      send_json_code(c, 200, out);
+    } else {
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not encode profiles\"}");
+    }
+    free(out);
+    free(buf);
+    return;
+
+}
+
 static void handle_profiles(int c, int is_post, const char *req, size_t hlen, size_t got,
                             const char *hdrs, const char *hend) {
   if (!is_post) {
-    char *buf;
-    struct stat st;
-    int fd = open(PROFILES_FILE, O_RDONLY);
-    if (fd < 0 || fstat(fd, &st) || st.st_size > 65536 || !(buf = malloc((size_t)st.st_size + 1))) {
-      if (fd >= 0)
-        close(fd);
-      send_json_code(c, 200, "{\"ok\":true,\"profiles\":null}");
-      return;
-    }
-    {
-      ssize_t r = read(fd, buf, (size_t)st.st_size);
-      char *out;
-      close(fd);
-      buf[r > 0 ? r : 0] = 0;
-      out = malloc((size_t)(r > 0 ? r : 0) + 64);
-      if (out && r > 1 && buf[0] == '{') {
-        sprintf(out, "{\"ok\":true,\"profiles\":%s}", buf);
-        send_json_code(c, 200, out);
-      } else
-        send_json_code(c, 200, "{\"ok\":true,\"profiles\":null}");
-      free(out);
-      free(buf);
-    }
+    pthread_mutex_lock(&profiles_mx);
+    pthread_mutex_lock(&auto_list_mx);
+    handle_profiles_read(c);
+    pthread_mutex_unlock(&auto_list_mx);
+    pthread_mutex_unlock(&profiles_mx);
     return;
   } else {
     const char *why;
     size_t n;
-    char *body = read_body(c, req, hlen, got, hdrs, hend, 65536, &n, &why);
-    int ok;
+    char *body;
+    char expected[80], auto_expected[80], current[65], auto_current[65];
+    char auto_header[AUTO_MAX * (AUTO_NAME_MAX + 3) + 8];
+    char joined[AUTO_MAX * AUTO_NAME_MAX], response[256];
+    char names[AUTO_MAX][AUTO_NAME_MAX];
+    char *old_profiles = NULL;
+    size_t old_profiles_n = 0, used = 0;
+    int old_profiles_exist = 0, auto_count = 0, i, write_count;
+    body = read_body(c, req, hlen, got, hdrs, hend, 65536, &n, &why);
     if (!body) {
       fs_reply_bad(c, 400, why);
       return;
@@ -3667,14 +3803,800 @@ static void handle_profiles(int c, int is_post, const char *req, size_t hlen, si
       fs_reply_bad(c, 400, "not JSON");
       return;
     }
-    mkdir(LAUNCHER_DIR, 0777);
-    ok = !write_atomic_under_data(PROFILES_FILE, (const uint8_t *)body, n);
-    free(body);
-    if (ok)
-      send_json_code(c, 200, "{\"ok\":true}");
-    else
+    if (hdr_get(hdrs, hend, "If-Match", expected, sizeof(expected)) ||
+        !expected[0] ||
+        hdr_get(hdrs, hend, "X-Auto-Revision", auto_expected,
+                sizeof(auto_expected)) || !auto_expected[0] ||
+        hdr_get(hdrs, hend, "X-Auto-List", auto_header,
+                sizeof(auto_header))) {
+      free(body);
+      send_json_code(c, 428, "{\"ok\":false,\"message\":\"profile and auto revisions required\"}");
+      return;
+    }
+    if (parse_auto_names_array(auto_header, strlen(auto_header), names,
+                               &auto_count, &why)) {
+      free(body);
+      fs_reply_bad(c, 400, why);
+      return;
+    }
+    if (!profiles_match_auto(body, n, names, auto_count)) {
+      free(body);
+      fs_reply_bad(c, 400, "active profile must match the ordered AutoPayload list");
+      return;
+    }
+    joined[0] = 0;
+    for (i = 0; i < auto_count; i++) {
+      size_t len = strlen(names[i]);
+      if (used + len + (i ? 1 : 0) >= sizeof(joined)) {
+        free(body);
+        fs_reply_bad(c, 400, "auto.list too large");
+        return;
+      }
+      if (i)
+        joined[used++] = ',';
+      memcpy(joined + used, names[i], len);
+      used += len;
+      joined[used] = 0;
+    }
+    pthread_mutex_lock(&profiles_mx);
+    pthread_mutex_lock(&auto_list_mx);
+    if (file_revision_sha256(PROFILES_FILE, 65536, current)) {
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read profiles revision\"}");
+      return;
+    }
+    if (file_revision_sha256(AUTO_LIST_PATH,
+                             AUTO_MAX * (AUTO_NAME_MAX + 1), auto_current)) {
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read auto.list revision\"}");
+      return;
+    }
+    if (strcmp(expected, current) || strcmp(auto_expected, auto_current)) {
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
+      snprintf(response, sizeof(response),
+               "{\"ok\":false,\"conflict\":true,\"revision\":\"%s\",\"autoRevision\":\"%s\"}",
+               current, auto_current);
+      send_json_code(c, 409, response);
+      return;
+    }
+    if (read_file_bounded(PROFILES_FILE, 65536, &old_profiles,
+                          &old_profiles_n, &old_profiles_exist)) {
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not back up profiles\"}");
+      return;
+    }
+    if (write_atomic_under_data(PROFILES_FILE, (const uint8_t *)body, n)) {
+      free(old_profiles);
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
       fs_reply_bad(c, 500, "write failed");
+      return;
+    }
+    write_count = write_auto_names_unlocked(joined);
+    if (write_count != auto_count) {
+      int rollback_failed = old_profiles_exist
+                                ? write_atomic_under_data(PROFILES_FILE,
+                                                          (const uint8_t *)old_profiles,
+                                                          old_profiles_n)
+                                : (unlink(PROFILES_FILE) != 0 && errno != ENOENT);
+      if (rollback_failed)
+        evlog("error", "profile/auto transaction rollback failed");
+      free(old_profiles);
+      pthread_mutex_unlock(&auto_list_mx);
+      pthread_mutex_unlock(&profiles_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"auto.list write failed; profile rolled back\"}");
+      return;
+    }
+    sha256_hex((const uint8_t *)body, n, current);
+    if (file_revision_sha256(AUTO_LIST_PATH,
+                             AUTO_MAX * (AUTO_NAME_MAX + 1), auto_current)) {
+      evlog("error", "profile/auto transaction saved but revision read failed");
+      auto_current[0] = 0;
+    }
+    free(old_profiles);
+    pthread_mutex_unlock(&auto_list_mx);
+    pthread_mutex_unlock(&profiles_mx);
+    free(body);
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"revision\":\"%s\",\"autoRevision\":\"%s\"}",
+             current, auto_current);
+    send_json_code(c, 200, response);
   }
+}
+
+static int file_revision_sha256(const char *path, size_t max_size,
+                                char revision[65]) {
+  struct stat st;
+  uint8_t *buf;
+  size_t used = 0;
+  int fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    if (errno != ENOENT)
+      return -1;
+    sha256_hex((const uint8_t *)"", 0, revision);
+    return 0;
+  }
+  if (fstat(fd, &st) || st.st_size < 0 || (uint64_t)st.st_size > max_size) {
+    close(fd);
+    return -1;
+  }
+  buf = malloc((size_t)st.st_size + 1);
+  if (!buf) {
+    close(fd);
+    return -1;
+  }
+  while (used < (size_t)st.st_size) {
+    ssize_t n = read(fd, buf + used, (size_t)st.st_size - used);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0) {
+      free(buf);
+      close(fd);
+      return -1;
+    }
+    used += (size_t)n;
+  }
+  close(fd);
+  sha256_hex(buf, used, revision);
+  free(buf);
+  return 0;
+}
+
+static void json_skip_space(const char **p) {
+  while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n')
+    (*p)++;
+}
+
+static int json_skip_string(const char **p, const char *end) {
+  if (*p >= end || *(*p)++ != '"')
+    return -1;
+  while (*p < end) {
+    unsigned char c = (unsigned char)*(*p)++;
+    if (c == '"')
+      return 0;
+    if (c < 0x20)
+      return -1;
+    if (c == '\\') {
+      if (*p >= end)
+        return -1;
+      c = (unsigned char)*(*p)++;
+      if (c == 'u') {
+        int i;
+        for (i = 0; i < 4; i++) {
+          if (*p >= end || !isxdigit((unsigned char)**p))
+            return -1;
+          (*p)++;
+        }
+      } else if (!strchr("\\\"/bfnrt", c))
+        return -1;
+    }
+  }
+  return -1;
+}
+
+static int json_skip_value(const char **p, const char *end) {
+  json_skip_space(p);
+  if (*p >= end)
+    return -1;
+  if (**p == '"')
+    return json_skip_string(p, end);
+  if (**p == '{' || **p == '[') {
+    char closes[64];
+    int depth = 0;
+    closes[depth++] = **p == '{' ? '}' : ']';
+    (*p)++;
+    while (*p < end && depth) {
+      if (**p == '"') {
+        if (json_skip_string(p, end))
+          return -1;
+      } else if (**p == '{' || **p == '[') {
+        if (depth >= (int)sizeof(closes))
+          return -1;
+        closes[depth++] = **p == '{' ? '}' : ']';
+        (*p)++;
+      } else if (**p == '}' || **p == ']') {
+        if (**p != closes[depth - 1])
+          return -1;
+        depth--;
+        (*p)++;
+      } else
+        (*p)++;
+    }
+    return depth ? -1 : 0;
+  }
+  while (*p < end && **p != ',' && **p != '}' && **p != ']' &&
+         **p != ' ' && **p != '\t' && **p != '\r' && **p != '\n')
+    (*p)++;
+  return 0;
+}
+
+static int json_top_field(const char *json, size_t len, const char *wanted,
+                          const char **value, size_t *value_len) {
+  const char *p = json, *end = json + len;
+  const char *found_value = NULL;
+  size_t found_len = 0;
+  json_skip_space(&p);
+  if (p >= end || *p++ != '{')
+    return -1;
+  for (;;) {
+    const char *key_start, *key_end, *start;
+    size_t key_len;
+    json_skip_space(&p);
+    if (p < end && *p == '}') {
+      p++;
+      json_skip_space(&p);
+      if (p != end || !found_value)
+        return -1;
+      *value = found_value;
+      *value_len = found_len;
+      return 0;
+    }
+    if (p >= end)
+      return -1;
+    key_start = p;
+    if (json_skip_string(&p, end))
+      return -1;
+    key_end = p - 1;
+    key_len = (size_t)(key_end - key_start - 1);
+    if (memchr(key_start + 1, '\\', key_len))
+      return -1;
+    json_skip_space(&p);
+    if (p >= end || *p++ != ':')
+      return -1;
+    json_skip_space(&p);
+    start = p;
+    if (json_skip_value(&p, end))
+      return -1;
+    if (key_len == strlen(wanted) && !memcmp(key_start + 1, wanted, key_len)) {
+      if (found_value)
+        return -1;
+      found_value = start;
+      found_len = (size_t)(p - start);
+    }
+    json_skip_space(&p);
+    if (p >= end)
+      return -1;
+    if (*p == ',') {
+      p++;
+      json_skip_space(&p);
+      if (p >= end || *p == '}')
+        return -1;
+      continue;
+    }
+    if (*p == '}')
+      continue;
+    return -1;
+  }
+}
+
+static int read_file_bounded(const char *path, size_t max_size, char **data,
+                             size_t *len, int *exists) {
+  struct stat st;
+  char *buf;
+  size_t used = 0;
+  int fd;
+  *data = NULL;
+  *len = 0;
+  *exists = 0;
+  fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return errno == ENOENT ? 0 : -1;
+  if (fstat(fd, &st) || st.st_size < 0 || (uint64_t)st.st_size > max_size) {
+    close(fd);
+    return -1;
+  }
+  buf = malloc((size_t)st.st_size + 1);
+  if (!buf) {
+    close(fd);
+    return -1;
+  }
+  while (used < (size_t)st.st_size) {
+    ssize_t n = read(fd, buf + used, (size_t)st.st_size - used);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0) {
+      free(buf);
+      close(fd);
+      return -1;
+    }
+    used += (size_t)n;
+  }
+  close(fd);
+  buf[used] = 0;
+  *data = buf;
+  *len = used;
+  *exists = 1;
+  return 0;
+}
+
+static int settings_open_after_jb(int *open_flag) {
+  char *data;
+  size_t len, value_len;
+  int exists, rc;
+  const char *value;
+  rc = read_file_bounded(SETTINGS_FILE, 65536, &data, &len, &exists);
+  if (rc || !exists)
+    return -1;
+  rc = json_top_field(data, len, "openAfterJb", &value, &value_len);
+  if (!rc && value_len == 4 && !memcmp(value, "true", 4))
+    *open_flag = 1;
+  else if (!rc && value_len == 5 && !memcmp(value, "false", 5))
+    *open_flag = 0;
+  else
+    rc = -1;
+  free(data);
+  return rc;
+}
+
+static int settings_delay_value(const char *data, size_t len, int *ms) {
+  const char *value;
+  size_t value_len;
+  char number[32], *endp;
+  double delay, twice;
+  if (json_top_field(data, len, "autoDelay", &value, &value_len) ||
+      !value_len || value_len >= sizeof(number) || !isdigit((unsigned char)value[0]))
+    return -1;
+  memcpy(number, value, value_len); number[value_len] = 0;
+  delay = strtod(number, &endp);
+  if (endp == number || *endp || !(delay >= 0 && delay <= 10)) return -1;
+  twice = delay * 2;
+  if (twice != (double)(long)twice) return -1;
+  *ms = (int)(delay * 1000.0 + 0.5);
+  return 0;
+}
+
+static int settings_auto_delay_ms(void) {
+  char *data;
+  size_t len;
+  int exists;
+  int result;
+  if (read_file_bounded(SETTINGS_FILE, 65536, &data, &len, &exists)) {
+    evlog("error", "AutoPayload delay unavailable: cannot read %s", SETTINGS_FILE);
+    return -1;
+  }
+  if (!exists) {
+    evlog("info", "AutoPayload delay=3000ms source=default (settings.json absent)");
+    return 3000;
+  }
+  if (settings_delay_value(data, len, &result)) result = -1;
+  free(data);
+  evlog(result < 0 ? "error" : "info", "AutoPayload delay=%dms source=settings.json%s", result,
+        result < 0 ? " (invalid; automatic sends blocked)" : "");
+  return result;
+}
+
+static int settings_validate(const char *json, size_t len, int *open_flag) {
+  static const char *langs[] = {"en", "ar", "es", "fr", "de", "pt", "ru",
+                                "ja", "zh", "it", 0};
+  static const char *themes[] = {"pearl", "gold", "black", "gray", "white",
+                                 "lavender", "sky", 0};
+  const char *value;
+  size_t value_len;
+  char lang[8];
+  char theme[24];
+  int i, delay_ms;
+  const char *lang_value;
+  size_t lang_len;
+  if (!json || len < 2 || json[0] != '{' || json[len - 1] != '}' ||
+      json_top_field(json, len, "lang", &lang_value, &lang_len) ||
+      lang_len < 4 || lang_len >= sizeof(lang) || lang_value[0] != '"' ||
+      lang_value[lang_len - 1] != '"' ||
+      memchr(lang_value + 1, '\\', lang_len - 2))
+    return 0;
+  memcpy(lang, lang_value + 1, lang_len - 2);
+  lang[lang_len - 2] = 0;
+  for (i = 0; langs[i]; i++)
+    if (!strcmp(lang, langs[i]))
+      break;
+  if (!langs[i] || json_top_field(json, len, "schema", &value, &value_len) ||
+      value_len != 1 || value[0] != '1')
+    return 0;
+  if (json_top_field(json, len, "theme", &value, &value_len) ||
+      value_len < 3 || value_len >= sizeof(theme) || value[0] != '"' ||
+      value[value_len - 1] != '"')
+    return 0;
+  memcpy(theme, value + 1, value_len - 2);
+  theme[value_len - 2] = 0;
+  for (i = 0; themes[i]; i++)
+    if (!strcmp(theme, themes[i]))
+      break;
+  if (!themes[i])
+    return 0;
+  if (settings_delay_value(json, len, &delay_ms)) return 0;
+  if (json_top_field(json, len, "openAfterJb", &value, &value_len))
+    return 0;
+  if (value_len == 4 && !memcmp(value, "true", 4))
+    *open_flag = 1;
+  else if (value_len == 5 && !memcmp(value, "false", 5))
+    *open_flag = 0;
+  else
+    return 0;
+  if (json_top_field(json, len, "pins", &value, &value_len) ||
+      value_len < 2 || value[0] != '[' || value[value_len - 1] != ']')
+    return 0;
+  if (json_top_field(json, len, "recent", &value, &value_len) ||
+      value_len < 2 || value[0] != '[' || value[value_len - 1] != ']')
+    return 0;
+  return 1;
+}
+
+static pthread_mutex_t settings_mx = PTHREAD_MUTEX_INITIALIZER;
+static void handle_settings(int c, int is_post, const char *req, size_t hlen,
+                            size_t got, const char *hdrs, const char *hend) {
+  if (!is_post) {
+    char *data, *out;
+    size_t len, outsz;
+    int exists, open_flag, delay_ms;
+    char revision[65], defaults[256];
+    if (read_file_bounded(SETTINGS_FILE, 65536, &data, &len, &exists)) {
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read settings\"}");
+      return;
+    }
+    if (!exists) {
+      open_flag = open_after_jb();
+      snprintf(defaults, sizeof(defaults),
+               "{\"schema\":1,\"lang\":\"en\",\"theme\":\"pearl\",\"autoDelay\":3,\"openAfterJb\":%s,\"pins\":[],\"recent\":[]}",
+               open_flag ? "true" : "false");
+      data = strdup(defaults);
+      if (!data) {
+        send_json_code(c, 500, "{\"ok\":false,\"message\":\"no memory\"}");
+        return;
+      }
+      len = strlen(data);
+      sha256_hex((const uint8_t *)"", 0, revision);
+    } else {
+      if (!settings_validate(data, len, &open_flag)) {
+        free(data);
+        send_json_code(c, 500, "{\"ok\":false,\"message\":\"settings.json is invalid\"}");
+        return;
+      }
+      sha256_hex((const uint8_t *)data, len, revision);
+    }
+    if (settings_delay_value(data, len, &delay_ms)) { free(data); send_json_code(c, 500, "{\"ok\":false,\"message\":\"invalid delay\"}"); return; }
+    outsz = len + 256;
+    out = malloc(outsz);
+    if (!out) {
+      free(data);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"no memory\"}");
+      return;
+    }
+    snprintf(out, outsz,
+             "{\"ok\":true,\"exists\":%s,\"revision\":\"%s\",\"autoDelayMs\":%d,\"delaySource\":\"%s\",\"settings\":%s}",
+             exists ? "true" : "false", revision, delay_ms, exists ? "settings.json" : "default", data);
+    send_json_code(c, 200, out);
+    free(out);
+    free(data);
+    return;
+  }
+  {
+    const char *why;
+    size_t len;
+    char *body;
+    char expected[80], current[65], response[160];
+    int open_flag;
+    body = read_body(c, req, hlen, got, hdrs, hend, 65536, &len, &why);
+    if (!body) {
+      fs_reply_bad(c, 400, why);
+      return;
+    }
+    if (!settings_validate(body, len, &open_flag)) {
+      free(body);
+      send_json_code(c, 400, "{\"ok\":false,\"message\":\"invalid settings schema\"}");
+      return;
+    }
+    if (hdr_get(hdrs, hend, "If-Match", expected, sizeof(expected)) ||
+        !expected[0]) {
+      free(body);
+      send_json_code(c, 428, "{\"ok\":false,\"message\":\"If-Match revision required\"}");
+      return;
+    }
+    pthread_mutex_lock(&settings_mx);
+    if (file_revision_sha256(SETTINGS_FILE, 65536, current)) {
+      pthread_mutex_unlock(&settings_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read settings revision\"}");
+      return;
+    }
+    if (strcmp(expected, current)) {
+      pthread_mutex_unlock(&settings_mx);
+      free(body);
+      snprintf(response, sizeof(response),
+               "{\"ok\":false,\"conflict\":true,\"revision\":\"%s\"}", current);
+      send_json_code(c, 409, response);
+      return;
+    }
+    /* The normal trusted-origin/custom-header guard also covers an explicit
+     * first write from PC. GET never initializes settings from localStorage. */
+    if (write_atomic_under_data(SETTINGS_FILE, (const uint8_t *)body, len)) {
+      pthread_mutex_unlock(&settings_mx);
+      free(body);
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"atomic settings write failed\"}");
+      return;
+    }
+    sha256_hex((const uint8_t *)body, len, current);
+    if (write_open_after_jb(open_flag))
+      evlog("error", "settings saved but open-after-jb legacy mirror could not be updated");
+    pthread_mutex_unlock(&settings_mx);
+    free(body);
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"revision\":\"%s\"}", current);
+    send_json_code(c, 200, response);
+  }
+}
+
+static int parse_auto_names_array(const char *body, size_t body_n,
+                                  char names[][AUTO_NAME_MAX], int *count,
+                                  const char **why) {
+  const char *p = body, *end = body + body_n;
+  int n = 0;
+  json_skip_space(&p);
+  if (p >= end || *p++ != '[')
+    goto bad_json;
+  json_skip_space(&p);
+  if (p < end && *p == ']') {
+    p++;
+    json_skip_space(&p);
+    if (p != end)
+      goto bad_json;
+    *count = 0;
+    return 0;
+  }
+  for (;;) {
+    char item[AUTO_NAME_MAX];
+    const char *start, *item_why;
+    size_t len;
+    json_skip_space(&p);
+    if (p >= end || *p++ != '"')
+      goto bad_json;
+    start = p;
+    while (p < end && *p != '"') {
+      if (*p == '\\' || (unsigned char)*p < 0x20)
+        goto bad_json;
+      p++;
+    }
+    if (p >= end)
+      goto bad_json;
+    len = (size_t)(p - start);
+    p++;
+    if (!len || len >= sizeof(item)) {
+      *why = "invalid filename length";
+      return -1;
+    }
+    memcpy(item, start, len);
+    item[len] = 0;
+    if (!add_auto_name_checked(names, &n, AUTO_MAX, item, &item_why)) {
+      *why = item_why;
+      return -1;
+    }
+    json_skip_space(&p);
+    if (p < end && *p == ']') {
+      p++;
+      json_skip_space(&p);
+      if (p != end)
+        goto bad_json;
+      *count = n;
+      return 0;
+    }
+    if (p >= end || *p++ != ',')
+      goto bad_json;
+  }
+bad_json:
+  *why = "expected a JSON array of ELF filenames";
+  return -1;
+}
+
+static int profile_active_value(const char *body, size_t len, const char **out, size_t *out_n) {
+  const char *active, *list, *order, *p, *end;
+  size_t active_n, list_n, order_n;
+  int found = 0;
+  if (json_top_field(body, len, "active", &active, &active_n) ||
+      active_n < 3 || active[0] != '"' || active[active_n - 1] != '"' ||
+      json_top_field(body, len, "order", &order, &order_n) || order_n < 2 || order[0] != '[' ||
+      json_top_field(body, len, "list", &list, &list_n) || list_n < 2 || list[0] != '{') return 0;
+  p = list + 1; end = list + list_n;
+  for (;;) {
+    const char *key, *value;
+    size_t key_n;
+    json_skip_space(&p);
+    if (p < end && *p == '}') return found == 1;
+    key = p;
+    if (json_skip_string(&p, end)) return 0;
+    key_n = (size_t)(p - key);
+    json_skip_space(&p);
+    if (p >= end || *p++ != ':') return 0;
+    json_skip_space(&p); value = p;
+    if (json_skip_value(&p, end)) return 0;
+    if (key_n == active_n && !memcmp(key, active, key_n)) {
+      if (++found != 1) return 0;
+      *out=value; *out_n=(size_t)(p-value);
+    }
+    json_skip_space(&p);
+    if (p < end && *p == ',') { p++; continue; }
+    if (p < end && *p == '}') return found == 1;
+    return 0;
+  }
+}
+
+static int profiles_match_auto(const char *body, size_t len,
+                               char names[][AUTO_NAME_MAX], int count) {
+  const char *value, *why;
+  size_t value_n;
+  char expected[AUTO_MAX][AUTO_NAME_MAX];
+  int n, i;
+  if (!profile_active_value(body,len,&value,&value_n) ||
+      parse_auto_names_array(value,value_n,expected,&n,&why) || n != count) return 0;
+  for (i=0;i<n;i++) if (strcmp(expected[i],names[i])) return 0;
+  return 1;
+}
+
+/* All callers hold profiles_mx then auto_list_mx. Keep direct list edits,
+ * uploads and /profiles on the same paired write path. Preserve inactive
+ * profiles byte-for-byte and roll back the profile if auto.list fails. */
+static int write_auto_pair_unlocked(char names[][AUTO_NAME_MAX], int count,
+                                    const char *serialized, size_t len) {
+  char *old=NULL, *updated=NULL, array[AUTO_MAX*(AUTO_NAME_MAX+3)+4];
+  const char *value;
+  size_t old_n=0, value_n=0, k=0, prefix, updated_n;
+  int exists, i, rc=0, changed=0;
+  if (read_file_bounded(PROFILES_FILE,65536,&old,&old_n,&exists)) return -1;
+  if (exists) {
+    if (!profile_active_value(old,old_n,&value,&value_n)) { free(old);return -1; }
+    array[k++]='[';
+    for (i=0;i<count;i++) k+=(size_t)snprintf(array+k,sizeof(array)-k,"%s\"%s\"",i?",":"",names[i]);
+    array[k++]=']';array[k]=0;
+    changed=k!=value_n || memcmp(array,value,k);
+    if (changed) {
+      prefix=(size_t)(value-old);updated_n=old_n-value_n+k;
+      if (updated_n>65536) { free(old);return -1; }
+      updated=malloc(updated_n);
+      if (!updated) { free(old);return -1; }
+      memcpy(updated,old,prefix);memcpy(updated+prefix,array,k);
+      memcpy(updated+prefix+k,value+value_n,old_n-prefix-value_n);
+      rc=write_atomic_under_data(PROFILES_FILE,(const uint8_t *)updated,updated_n);
+      free(updated);
+      if (rc) { free(old);return -1; }
+    }
+  }
+  rc=write_atomic_under_data(AUTO_LIST_PATH,(const uint8_t *)serialized,len);
+  if (rc && changed && write_atomic_under_data(PROFILES_FILE,(const uint8_t *)old,old_n))
+    evlog("error","AutoPayload paired write rollback failed; configuration needs review");
+  free(old);
+  return rc ? -1 : 0;
+}
+
+static int auto_list_response(char *out, size_t outsz, int ok,
+                              char names[][AUTO_NAME_MAX], int count,
+                              const char *revision) {
+  size_t used;
+  int i, n;
+  n = snprintf(out, outsz,
+               "{\"ok\":%s,\"count\":%d,\"revision\":\"%s\",\"names\":[",
+               ok ? "true" : "false", count, revision);
+  if (n < 0 || (size_t)n >= outsz)
+    return -1;
+  used = (size_t)n;
+  for (i = 0; i < count; i++) {
+    n = snprintf(out + used, outsz - used, "%s\"%s\"",
+                 i ? "," : "", names[i]);
+    if (n < 0 || (size_t)n >= outsz - used)
+      return -1;
+    used += (size_t)n;
+  }
+  if (used + 3 > outsz)
+    return -1;
+  memcpy(out + used, "]}", 3);
+  return (int)(used + 2);
+}
+
+static void handle_auto_list(int c, int is_post, const char *req, size_t hlen,
+                             size_t got, const char *hdrs, const char *hend,
+                             const char *qs) {
+  char names[AUTO_MAX][AUTO_NAME_MAX];
+  char json[AUTO_MAX * 160 + 256];
+  char revision[65], expected[80], joined[AUTO_MAX * AUTO_NAME_MAX];
+  int count = 0, rc;
+  if (!is_post) {
+    if (qs && strstr(qs, "names=")) {
+      send_json_code(c, 405, "{\"ok\":false,\"message\":\"use POST /auto-list\"}");
+      return;
+    }
+    pthread_mutex_lock(&profiles_mx);
+  pthread_mutex_lock(&auto_list_mx);
+    count = read_auto_list(names, AUTO_MAX);
+    rc = file_revision_sha256(AUTO_LIST_PATH,
+                              AUTO_MAX * (AUTO_NAME_MAX + 1), revision);
+    pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+    if (rc || auto_list_response(json, sizeof(json), 1, names, count, revision) < 0)
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read auto.list\"}");
+    else
+      send_json_code(c, 200, json);
+    return;
+  }
+  {
+    const char *why = "invalid request";
+    size_t body_n = 0;
+    char *body = read_body(c, req, hlen, got, hdrs, hend, 8192, &body_n, &why);
+    int i;
+    size_t used = 0;
+    if (!body) {
+      fs_reply_bad(c, 400, why);
+      return;
+    }
+    if (parse_auto_names_array(body, body_n, names, &count, &why)) {
+      free(body);
+      fs_reply_bad(c, 400, why);
+      return;
+    }
+    if (hdr_get(hdrs, hend, "If-Match", expected, sizeof(expected)) ||
+        !expected[0]) {
+      free(body);
+      send_json_code(c, 428, "{\"ok\":false,\"message\":\"If-Match revision required\"}");
+      return;
+    }
+    joined[0] = 0;
+    for (i = 0; i < count; i++) {
+      size_t len = strlen(names[i]);
+      if (used + len + (i ? 1 : 0) >= sizeof(joined)) {
+        free(body);
+        send_json_code(c, 400, "{\"ok\":false,\"message\":\"auto.list too large\"}");
+        return;
+      }
+      if (i)
+        joined[used++] = ',';
+      memcpy(joined + used, names[i], len);
+      used += len;
+      joined[used] = 0;
+    }
+    free(body);
+  }
+  pthread_mutex_lock(&profiles_mx);
+  pthread_mutex_lock(&auto_list_mx);
+  rc = file_revision_sha256(AUTO_LIST_PATH,
+                            AUTO_MAX * (AUTO_NAME_MAX + 1), revision);
+  if (rc) {
+    pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+    send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not read auto.list revision\"}");
+    return;
+  }
+  if (strcmp(expected, revision)) {
+    count = read_auto_list(names, AUTO_MAX);
+    rc = auto_list_response(json, sizeof(json), 0, names, count, revision);
+    pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+    if (rc < 0)
+      send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not report conflict\"}");
+    else
+      send_json_code(c, 409, json);
+    return;
+  }
+  rc = write_auto_names_unlocked(joined);
+  if (rc < 0 || file_revision_sha256(AUTO_LIST_PATH,
+                                     AUTO_MAX * (AUTO_NAME_MAX + 1), revision)) {
+    pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+    send_json_code(c, 500, "{\"ok\":false,\"message\":\"atomic auto.list write failed\"}");
+    return;
+  }
+  count = rc;
+  rc = auto_list_response(json, sizeof(json), 1, names, count, revision);
+  pthread_mutex_unlock(&auto_list_mx);
+  pthread_mutex_unlock(&profiles_mx);
+  if (rc < 0)
+    send_json_code(c, 500, "{\"ok\":false,\"message\":\"could not report saved auto.list\"}");
+  else
+    send_json_code(c, 200, json);
 }
 
 /* ---- system info: temperatures, memory, free space ---- */
@@ -4371,8 +5293,10 @@ static void handle_save_path(int c, const char *qs) {
     hex[64] = 0;
     write_sha256_sidecar(dest, hex);
   }
-  if (autoadd && strlen(name) > 4 && !strcasecmp(name + strlen(name) - 4, ".elf"))
-    add_to_auto_list(name);
+  if (autoadd && strlen(name) > 4 && !strcasecmp(name + strlen(name) - 4, ".elf") && add_to_auto_list(name)) {
+    send_result_json(c, 500, g_cors, 0, "file saved but AutoPayload configuration was not saved", 0, "", 0, "", name);
+    return;
+  }
   send_result_json(c, 200, g_cors, 1, "saved", (long long)st.st_size, "", 0, "", name);
 }
 
@@ -4605,8 +5529,10 @@ static void run_upload(upload_job_t *j) {
   hex[64] = 0;
   if (save)
     write_sha256_sidecar(dest, hex);
-  if (autoadd && !strcasecmp(name + strlen(name) - 4, ".elf"))
-    add_to_auto_list(name);
+  if (autoadd && !strcasecmp(name + strlen(name) - 4, ".elf") && add_to_auto_list(name)) {
+    send_result_json(j->c, 500, j->cors, 0, "file saved but AutoPayload configuration was not saved", 0, "", 0, "", name);
+    return;
+  }
   flag[0] = 0;
   qget(j->qs, "run", flag, sizeof(flag));
   if (save && flag[0] == '0') {
@@ -4688,98 +5614,17 @@ static int handle_upload(int c, const char *qs, const char *hdrs,
   return 1;
 }
 
-static void run_headless_auto(void) {
-  char listed[AUTO_MAX][AUTO_NAME_MAX];
-  char use[AUTO_MAX][AUTO_NAME_MAX];
-  int n, e, i, sent = 0, skipped = 0;
-  char path[512];
-  char emsg[256];
-  int from_list, rc;
-
-  sleep(1);
-  n = read_auto_list(listed, AUTO_MAX);
-  e = existing_names(listed, n, use, AUTO_MAX);
-  from_list = n > 0;
-  if (e == 0) {
-    scan_page_storage();
-    e = existing_names(storage_names, storage_name_count, use, AUTO_MAX);
-    if (e > 0) {
-      char joined[AUTO_MAX * AUTO_NAME_MAX];
-      size_t used = 0;
-      joined[0] = 0;
-      for (i = 0; i < e; i++) {
-        size_t L = strlen(use[i]);
-        if (used && used + 1 < sizeof(joined))
-          joined[used++] = ',';
-        if (used + L >= sizeof(joined))
-          break;
-        memcpy(joined + used, use[i], L);
-        used += L;
-        joined[used] = 0;
-      }
-      write_auto_names(joined);
-      from_list = 1;
-    }
-  }
-
-  /* Empty queue: do not consume the one-shot; allow a later mark/download.
-   * Stay silent when nothing is marked Auto (avoid a notify every jailbreak). */
-  if (e == 0) {
-    if (from_list && n > 0) {
-      for (i = 0; i < n; i++)
-        notify("Skipped %s", listed[i]);
-    }
-    return;
-  }
-
-  /* Notify listed names that are missing on disk before sending the rest. */
-  if (from_list && n > e) {
-    for (i = 0; i < n; i++) {
-      int found = 0, j;
-      for (j = 0; j < e; j++) {
-        if (!strcmp(listed[i], use[j])) {
-          found = 1;
-          break;
-        }
-      }
-      if (!found) {
-        notify("Skipped %s", listed[i]);
-        skipped++;
-      }
-    }
-  }
-
-  /* Non-empty runnable queue: consume one-shot for this jailbreak/boot. */
-  write_boot_auto_done();
-
-  for (i = 0; i < e; i++) {
-    if (auto_disk_path(use[i], path, sizeof(path))) {
-      notify("Skipped %s", use[i]);
-      evlog("error", "AutoPayload skipped %s (file missing)", use[i]);
-      skipped++;
-      continue;
-    }
-    send_lock_wait();
-    rc = elfldr_send_path(path, "", emsg, sizeof(emsg), 1000);
-    send_unlock();
-    if (rc == SEND_OK) {
-      sent++;
-      evlog("load", "AutoPayload loaded %s", use[i]);
-      usleep(300000);
-    } else {
-      evlog("error", "AutoPayload skipped %s (%s)", use[i], send_err_text(rc));
-      notify("Skipped %s (%s)", use[i], send_err_text(rc));
-      skipped++;
-    }
-  }
-  /* all AutoPayloads sent: no toast; only report skips */
-  if (sent == 0 && skipped > 0)
-    notify("Skipped");
+/* Fail explicitly if this PS5 does not expose the expected volatile mount.
+ * Never fall back to /data, uptime comparisons or wall-clock boot estimates. */
+static int auto_tmp_is_volatile(void) {
+  struct statfs fs;
+  return !statfs("/system_tmp", &fs) && !strcmp(fs.f_fstypename, "tmpfs");
 }
 
+#include "auto_boot.inc"
+
 static void *headless_auto_thread(void *arg) {
-  (void)arg;
-  run_headless_auto();
+  run_headless_auto((const char *)arg);
   return NULL;
 }
 
@@ -4853,23 +5698,31 @@ static void close_browser_if_front(void) {
 }
 
 static void *headless_auto_close_thread(void *arg) {
-  (void)arg;
-  run_headless_auto();
-  sleep(1);
-  close_browser_if_front();
+  run_headless_auto((const char *)arg);
+  if (!auto_cancelled()) { sleep(1); close_browser_if_front(); }
   return NULL;
 }
 
-static void start_headless_auto_then_close(void) {
+static void start_headless_auto_then_close(const char *source) {
   pthread_t th;
-  if (pthread_create(&th, NULL, headless_auto_close_thread, NULL) == 0)
+  if (!auto_claim()) return;
+  if (pthread_create(&th, NULL, headless_auto_close_thread, (void *)source) == 0)
     pthread_detach(th);
+  else {
+    auto_start_failed();
+    evlog("error", "AutoPayload thread creation failed: source=%s", source ? source : "unknown");
+  }
 }
 
-static void start_headless_auto(void) {
+static void start_headless_auto(const char *source) {
   pthread_t th;
-  if (pthread_create(&th, NULL, headless_auto_thread, NULL) == 0)
+  if (!auto_claim()) return;
+  if (pthread_create(&th, NULL, headless_auto_thread, (void *)source) == 0)
     pthread_detach(th);
+  else {
+    auto_start_failed();
+    evlog("error", "AutoPayload thread creation failed: source=%s", source ? source : "unknown");
+  }
 }
 
 static void serve(void) {
@@ -4877,12 +5730,19 @@ static void serve(void) {
   static char req[REQ_MAX + 1];
   char path[512];
   int from_wkal = consume_wkal_mark();
-  int takeover = consume_takeover_mark();
+  int takeover_marker_present = access(TAKEOVER_MARK_PATH, F_OK) == 0;
+  int takeover_mark = consume_takeover_mark();
+  int takeover = takeover_mark;
   int want_open, accept_fail = 0;
   int port_busy = http_port_open();
   int already_up = port_busy && http_alive();
+  int boot_marker_present = access(BOOT_AUTO_DONE_PATH, F_OK) == 0;
   int newbuild = 0;
   char rbuild[64] = "";
+
+  evlog("info", "serve entry: from-wkal=%d takeover-file=%d update-takeover=%d boot-auto-done=%d port-busy=%d http-alive=%d",
+        from_wkal, takeover_marker_present, takeover_mark, boot_marker_present,
+        port_busy, already_up);
 
   /* A different launcher build was sent while one is serving :1000: replace
    * it whatever the open-after-jailbreak setting says. The same build sent
@@ -4896,43 +5756,27 @@ static void serve(void) {
     }
   }
 
-  /* Clear AutoPayload one-shot on every fresh :1000 bind (new ELF after JB).
-   * from-wkal used to be required, but Hybrid often sends only elf-launcher.elf
-   * (no mark), so Open browser skipped Auto while Leave closed still ran. */
+  /* Validate boot identity on a fresh bind. A live server and an update
+   * hand-off retain the one-shot even when WK supplies a fresh marker. */
   if (takeover) {
+    evlog("info", "serve takeover path: update-mark=%d newbuild=%d", takeover_mark,
+          newbuild);
     /* Update hand-off: replace the old server, keep the AutoPayload one-shot. */
     if (port_busy) {
       kill_other_elf_launchers();
       usleep(300000);
     }
     already_up = 1; /* long bind retry below */
-  } else if (!already_up)
-    clear_boot_auto_done();
-  else if (from_wkal)
-    clear_boot_auto_done();
+  }
 
-  /* Leave closed / open preference applies with or without the from-wkal
-   * mark. If :1000 is already up and we are not forcing a manual takeover
-   * (open preference + no mark), keep the live server and only open the
-   * page or run AutoPayload. Manual open still takes over :1000. */
+  /* A same-build reopen keeps the live owner, worker and progress session. */
   if (already_up && !takeover) {
-    if (from_wkal || !wk_wants_open()) {
-      /* Open browser still needs disk Auto (auto.list); page localStorage often empty. */
-      if (!boot_auto_done())
-        run_headless_auto();
-      if (wk_wants_open())
-        launch_browser_now();
-      else {
-        evlog("info", "leave closed (live server)");
-        sleep(1);
-        close_browser_if_front();
-      }
-      return;
-    }
-    kill_other_elf_launchers();
-    usleep(300000);
+    evlog("info", "serve keeps live server and its AutoPayload owner");
+    if (wk_wants_open()) launch_browser_now();
+    return;
   } else if (port_busy && !takeover) {
     /* Something holds :1000 but does not answer: replace it. */
+    evlog("info", "serve route: port :1000 busy but HTTP not alive; replacing launcher");
     kill_other_elf_launchers();
     usleep(300000);
     already_up = 1;
@@ -4941,6 +5785,8 @@ static void serve(void) {
   /* Update hand-off: no browser. A newer build sent by hand: the setting
    * decides whether the page opens. */
   want_open = (takeover && !newbuild) ? 0 : wk_wants_open();
+  evlog("info", "serve selected route: takeover=%d newbuild=%d open-after-jb=%d",
+        takeover, newbuild, want_open);
 
   /* The old server may need a moment to release :1000 after the kill. */
   for (tries = already_up ? 20 : 3; tries > 0; tries--) {
@@ -4962,6 +5808,8 @@ static void serve(void) {
       s = -1;
   }
   if (s < 0) {
+    evlog("error", "serve could not bind :1000; AutoPayload not dispatched (open=%d takeover=%d)",
+          want_open, takeover);
     if (want_open)
       start_fresh_browser();
     if (!home_icon_up_to_date()) {
@@ -4970,6 +5818,8 @@ static void serve(void) {
     return;
   }
   if (listen(s, 16) < 0) {
+    evlog("error", "serve listen(:1000) failed: errno=%d; AutoPayload not dispatched",
+          errno);
     close(s);
     if (!home_icon_up_to_date()) {
       tile_report(install_home_icon());
@@ -4977,21 +5827,24 @@ static void serve(void) {
     return;
   }
   puts("listening");
-  /* Open browser: same disk Auto as Leave closed (do not gate on boot-auto-done
-   * here: flag was just cleared on fresh bind). Then open the WebView. */
+  auto_restore();
+  /* Start the sole worker after listen(), then open WebView independently.
+   * The HTTP loop remains available throughout countdown and sends. */
   if (takeover) {
     notify("Elf Launcher updated");
-    /* AutoPayload already ran this boot under the old server: never twice. */
-    if (newbuild && !boot_auto_done())
-      start_headless_auto();
+    /* Restore completed/attempted runs without replay. An interrupted countdown
+     * (no send admitted) may safely resume after either kind of update. */
+    start_headless_auto("serve-build-takeover");
     if (newbuild && want_open)
       start_fresh_browser();
   } else if (want_open) {
-    run_headless_auto();
+    evlog("info", "serve dispatch: background AutoPayload with live progress");
+    start_headless_auto("serve-fresh-bind-open");
     start_fresh_browser();
   } else {
     evlog("info", "leave closed");
-    start_headless_auto_then_close();
+    evlog("info", "serve dispatch: AutoPayload headless with browser close");
+    start_headless_auto_then_close("serve-fresh-bind-closed");
   }
   /* Bind of :1000. Install the home icon once in the background. */
   start_home_icon_install_async(0);
@@ -5046,7 +5899,7 @@ static void serve(void) {
         h = snprintf(opt, sizeof(opt),
                      "HTTP/1.1 204 No Content\r\n%s"
                      "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                     "Access-Control-Allow-Headers: X-ELFL, Content-Type\r\n"
+                     "Access-Control-Allow-Headers: X-ELFL, Content-Type, If-Match, X-Auto-Revision, X-Auto-List, X-ELFL-Init\r\n"
                      "Access-Control-Max-Age: 600\r\n"
                      "Content-Length: 0\r\nConnection: close\r\n\r\n",
                      g_cors);
@@ -5083,7 +5936,7 @@ static void serve(void) {
       p++;
     if (!strncmp(p, "files/", 6))
       p += 6;
-    if (is_mutating(p, q ? q + 1 : 0) && !req_trusted(c, hdrs, hend) &&
+    if (is_mutating(p, q ? q + 1 : 0, is_post) && !req_trusted(c, hdrs, hend) &&
         /* WK Autoloader pings this with a no-cors GET that may carry neither
            Origin nor Referer. It only re-runs the user's own AutoPayload. */
         !(!strcmp(p, "trigger-auto") && !has_origin_or_referer(hdrs, hend))) {
@@ -5125,6 +5978,13 @@ static void serve(void) {
     }
     if (!strcmp(p, "events/add")) {
       handle_events_add(c, q ? q + 1 : "");
+      close(c);
+      continue;
+    }
+    if (!strcmp(p, "settings")) {
+      handle_settings(c, is_post, req, hlen, got, hdrs, hend);
+      if (is_post)
+        drain_briefly(c);
       close(c);
       continue;
     }
@@ -5301,11 +6161,22 @@ static void serve(void) {
       close(c);
       continue;
     }
-    /* Hybrid open-only / WK: clear one-shot and run disk Auto without re-sending ELF. */
+    if (!strcmp(p, "auto-status")) {
+      if (is_post) send_json_code(c, 405, "{\"ok\":false}");
+      else handle_auto_status(c);
+      close(c);
+      continue;
+    }
+    if (!strcmp(p, "auto-cancel")) {
+      handle_auto_cancel(c, q ? q + 1 : NULL, is_post);
+      close(c);
+      continue;
+    }
+    /* Keep the WK open-only trigger compatible, but never reset the one-shot. */
     if (!strcmp(p, "trigger-auto")) {
       const char *ok = "{\"ok\":true,\"triggered\":true}";
-      clear_boot_auto_done();
-      start_headless_auto();
+      evlog("info", "AutoPayload trigger requested via /trigger-auto (one-shot protected)");
+      start_headless_auto("http-trigger-auto");
       send_json(c, 1, ok, strlen(ok));
       close(c);
       continue;
@@ -5313,28 +6184,15 @@ static void serve(void) {
     /* Persist AutoPayload one-shot across page/app opens until reboot or fresh JB. */
     if (!strcmp(p, "boot-auto")) {
       char flag[8];
-      char json[64];
-      int done;
       flag[0] = 0;
       if (q)
         qget(q + 1, "done", flag, sizeof(flag));
-      if (flag[0] == '1') {
-        if (write_boot_auto_done()) {
-          const char *err = "{\"ok\":false,\"message\":\"could not save\"}";
-          send_json(c, 0, err, strlen(err));
-          close(c);
-          continue;
-        }
-        done = 1;
-      } else if (flag[0] == '0') {
-        clear_boot_auto_done();
-        done = 0;
-      } else {
-        done = boot_auto_done();
+      if (flag[0]) {
+        send_json_code(c, 405, "{\"ok\":false,\"message\":\"read only\"}");
+        close(c);
+        continue;
       }
-      snprintf(json, sizeof(json), "{\"ok\":true,\"done\":%s}",
-               done ? "true" : "false");
-      send_json(c, 1, json, strlen(json));
+      handle_boot_auto(c);
       close(c);
       continue;
     }
@@ -5354,23 +6212,14 @@ static void serve(void) {
       continue;
     }
     if (!strcmp(p, "browser-pref")) {
-      char flag[8];
       char json[96];
       int open_flag;
-      flag[0] = 0;
-      if (q)
-        qget(q + 1, "open", flag, sizeof(flag));
-      if (flag[0] == '1' || flag[0] == '0') {
-        open_flag = flag[0] == '1';
-        if (write_open_after_jb(open_flag)) {
-          const char *err = "{\"ok\":false,\"message\":\"could not save\"}";
-          send_json(c, 0, err, strlen(err));
-          close(c);
-          continue;
-        }
-      } else {
-        open_flag = open_after_jb();
+      if (is_post || (q && strstr(q + 1, "open="))) {
+        send_json_code(c, 405, "{\"ok\":false,\"message\":\"use POST /settings\"}");
+        close(c);
+        continue;
       }
+      open_flag = open_after_jb();
       snprintf(json, sizeof(json), "{\"ok\":true,\"open\":%s}",
                open_flag ? "true" : "false");
       send_json(c, 1, json, strlen(json));
@@ -5378,25 +6227,10 @@ static void serve(void) {
       continue;
     }
     if (!strcmp(p, "auto-list")) {
-      char names[1800];
-      char json[96];
-      int count;
-      names[0] = 0;
-      if (q && strstr(q + 1, "names=")) {
-        qget(q + 1, "names", names, sizeof(names));
-        count = write_auto_names(names);
-        if (count < 0) {
-          const char *err = "{\"ok\":false,\"message\":\"could not save\"}";
-          send_json(c, 0, err, strlen(err));
-          close(c);
-          continue;
-        }
-      } else {
-        char listed[AUTO_MAX][AUTO_NAME_MAX];
-        count = read_auto_list(listed, AUTO_MAX);
-      }
-      snprintf(json, sizeof(json), "{\"ok\":true,\"count\":%d}", count);
-      send_json(c, 1, json, strlen(json));
+      handle_auto_list(c, is_post, req, hlen, got, hdrs, hend,
+                       q ? q + 1 : 0);
+      if (is_post)
+        drain_briefly(c);
       close(c);
       continue;
     }

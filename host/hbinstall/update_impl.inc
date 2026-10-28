@@ -168,6 +168,13 @@ static int write_atomic_under_data(const char *final_path, const uint8_t *data,
     unlink(tmp);
     return -5;
   }
+  /* A successful configuration reply must follow a flushed file, rather
+   * than rely on buffered data surviving the next console restart. */
+  if (fflush(f) || fsync(fileno(f))) {
+    fclose(f);
+    unlink(tmp);
+    return -6;
+  }
   if (fclose(f)) {
     unlink(tmp);
     return -6;
