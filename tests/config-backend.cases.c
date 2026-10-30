@@ -43,6 +43,34 @@ int main(void) {
   names_n=read_auto_list(checked_names,AUTO_MAX);assert(profiles_match_auto(profile_data,profile_n,checked_names,names_n));
   assert(strstr(profile_data,three));free(profile_data);
   fail_target=1;assert(add_to_auto_list("rejected.elf")==-1);check_names(4,"nanodns.elf");fail_target=0;
+  /* Real paired writes preserve profile-specific intervals and filename order. */
+  revisions(pr,ar);
+  snprintf(profile,sizeof(profile),"{\"active\":\"Default\",\"order\":[\"Default\",\"DNS\"],\"list\":{\"Default\":%s,\"DNS\":[\"nanodns.elf\"]},\"intervals\":{\"Default\":{\"kstuff-lite.elf\":5,\"ProsperoMgr.elf\":300},\"DNS\":{\"nanodns.elf\":3}}}",three);
+  save_profile(profile,three,pr,ar);assert(code==200);
+  int ms[AUTO_MAX];assert(auto_sequence_snapshot(checked_names,ms)==3);
+  assert(ms[0]==5000 && ms[1]==0 && ms[2]==300000);
+  assert(!strcmp(checked_names[0],"kstuff-lite.elf"));
+  /* A failed auto.list replacement rolls back interval edits too. */
+  revisions(pr,ar);fail_target=1;save_profile(profile,three,pr,ar);assert(code==500);fail_target=0;
+  assert(auto_sequence_snapshot(checked_names,ms)==3 && ms[0]==5000);
+  const char *bad_interval[]={"-1","301","1.5","\"5\"","null","true","1e2","01"};
+  for(unsigned i=0;i<sizeof(bad_interval)/sizeof(bad_interval[0]);i++) {
+    revisions(pr,ar);
+    snprintf(profile,sizeof(profile),"{\"active\":\"Default\",\"order\":[\"Default\"],\"list\":{\"Default\":%s},\"intervals\":{\"Default\":{\"kstuff-lite.elf\":%s}}}",three,bad_interval[i]);
+    save_profile(profile,three,pr,ar);assert(code==400);
+    assert(auto_sequence_snapshot(checked_names,ms)==3 && ms[0]==5000);
+  }
+  const char *legacy_profile="{\"active\":\"intervals\",\"order\":[\"intervals\"],\"list\":{\"intervals\":[]}}";
+  assert(intervals_validate(legacy_profile,strlen(legacy_profile)));
+  revisions(pr,ar);
+  const char *reordered="[\"ProsperoMgr.elf\",\"kstuff-lite.elf\",\"shadowmountplus.elf\"]";
+  snprintf(profile,sizeof(profile),"{\"active\":\"Default\",\"order\":[\"Default\",\"DNS\"],\"list\":{\"Default\":%s,\"DNS\":[\"nanodns.elf\"]},\"intervals\":{\"Default\":{\"kstuff-lite.elf\":5,\"ProsperoMgr.elf\":300},\"DNS\":{\"nanodns.elf\":3}}}",reordered);
+  save_profile(profile,reordered,pr,ar);assert(code==200);
+  assert(auto_sequence_snapshot(checked_names,ms)==3 && ms[0]==300000 && ms[1]==5000 && ms[2]==0);
+  revisions(pr,ar);
+  snprintf(profile,sizeof(profile),"{\"active\":\"DNS\",\"order\":[\"Default\",\"DNS\"],\"list\":{\"Default\":%s,\"DNS\":[\"nanodns.elf\"]},\"intervals\":{\"Default\":{\"kstuff-lite.elf\":5,\"ProsperoMgr.elf\":300},\"DNS\":{\"nanodns.elf\":3}}}",reordered);
+  save_profile(profile,"[\"nanodns.elf\"]",pr,ar);assert(code==200);
+  assert(auto_sequence_snapshot(checked_names,ms)==1 && ms[0]==3000);
   /* Missing settings remain missing on GET. Their default is explicit. */
   handle_settings(0,0,"",0,0,"","");assert(code==200&&strstr(response,"\"autoDelayMs\":3000")&&strstr(response,"\"exists\":false"));
   assert(access(SETTINGS_FILE,F_OK));

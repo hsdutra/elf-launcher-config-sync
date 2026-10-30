@@ -44,18 +44,21 @@ test('PC and PS5 independently observe the same backend session without sends or
   assert.equal(pc.context.bootView.session,ps5.context.bootView.session);
   assert.equal(pc.requests.length+ps5.requests.length,0);
 });
-test('terminal snapshots and empty queues never open splash; observed completion dismisses after 2.5s',()=>{
+test('terminal snapshots and empty queues never open splash; observed completion stays until Close',()=>{
   const a=client({});a.context.bootRender(state(0));assert.ok(!a.context.bootView.visible);
   a.context.bootRender(state(3,'completed'));assert.ok(!a.context.bootView.visible);
   a.context.bootRender(state(3));a.context.bootRender(state(3,'completed'));
-  const timer=a.timers.find(t=>t.ms===2500);assert.ok(timer);timer.fn();assert.ok(!a.context.bootView.visible);
+  assert.ok(!a.timers.find(t=>t.ms===2500));assert.ok(a.context.bootView.visible);
+  a.context.bootDismiss();assert.ok(!a.context.bootView.visible);
+  a.context.bootRender(state(3));assert.ok(!a.context.bootView.visible);
 });
-test('cancel is an explicit POST tied to current session; hides only after acceptance',async()=>{
+test('cancel is an explicit POST tied to current session; retains results after acceptance',async()=>{
   let accept;const a=client({},()=>new Promise(resolve=>accept=resolve));a.context.bootRender(state(3));a.context.padCancelAuto();
   assert.ok(a.context.bootView.visible);assert.equal(a.requests.length,1);
   assert.equal(a.requests[0].url,'/auto-cancel?session=boot-1');assert.equal(a.requests[0].options.method,'POST');
   a.context.padCancelAuto();assert.equal(a.requests.length,1);
-  accept({ok:true});await new Promise(setImmediate);assert.ok(!a.context.bootView.visible);
+  accept({ok:true});await new Promise(setImmediate);assert.ok(a.context.bootView.visible);
+  a.context.bootRender(state(3,'cancelled'));assert.ok(a.context.bootView.visible);
 });
 test('cancel rejection leaves progress visible and permits retry',async()=>{
   const a=client({},()=>Promise.resolve({ok:false,status:409}));a.context.bootRender(state(3));a.context.padCancelAuto();
@@ -75,6 +78,6 @@ test('late timed-out responses do not overwrite the current snapshot',async()=>{
 test('all supported languages provide every splash label',()=>{
   const c=client({}).context;
   for(const lang of ['en','pt','es','fr','de','it','ru','ja','zh','ar']){
-    c.LANG=lang;for(let i=0;i<17;i++)assert.ok(c.bootText(i));
+    c.LANG=lang;for(let i=0;i<26;i++)assert.ok(c.bootText(i));
   }
 });

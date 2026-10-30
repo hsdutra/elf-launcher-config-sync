@@ -51,7 +51,7 @@ static int auto_boot_identity(void) {
 }
 
 static const char *auto_literal(const char *s, int phase) {
-  static const char *phases[] = {"preparing", "waiting", "loading", "completed", "cancelled", "error", NULL};
+  static const char *phases[] = {"preparing", "waiting", "interval", "loading", "completed", "cancelled", "error", NULL};
   static const char *states[] = {"pending", "loading", "success", "error", "skipped", "cancelled", NULL};
   const char **list = phase ? phases : states;
   int i;

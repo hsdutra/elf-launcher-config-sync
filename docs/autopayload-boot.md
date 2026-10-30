@@ -53,7 +53,10 @@ O ID de sessão guardado no navegador serve apenas para suprimir a reapresentaç
 na atualização/reabertura. Configurações, perfis e execução continuam no PS5.
 Um navegador diferente pode acompanhar uma execução ativa. Snapshots já
 terminados não reapresentam o ecrã. Após observar a conclusão, o resumo fica
-visível durante 2,5 segundos; também se pode abrir a interface imediatamente.
+visível até premir explicitamente **Fechar**, incluindo em caso de erro ou
+cancelamento. Fechar não cancela a sequência. **Ver detalhes** expande apenas
+os diagnósticos. Os intervalos por perfil e a validação da v2.0.5 estão descritos
+em [autopayload-v2.0.5.md](autopayload-v2.0.5.md).
 O ecrã usa as cores do tema, as dez traduções e a navegação existente do comando.
 
 ## Demonstração offline

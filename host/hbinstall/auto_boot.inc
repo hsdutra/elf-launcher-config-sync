@@ -77,7 +77,7 @@ static void auto_finish(void) {
 static void run_headless_auto(const char *source) {
   char listed[AUTO_MAX][AUTO_NAME_MAX], use[AUTO_MAX][AUTO_NAME_MAX];
   char path[512], emsg[256];
-  int i, n, e, delay_ms = settings_auto_delay_ms();
+  int intervals[AUTO_MAX], i, n, e, delay_ms = settings_auto_delay_ms();
   if (delay_ms < 0) {
     pthread_mutex_lock(&auto_mu);
     boot_auto.phase = "error"; boot_auto.started = 0;
@@ -85,7 +85,14 @@ static void run_headless_auto(const char *source) {
     pthread_mutex_unlock(&auto_mu);
     return;
   }
-  n = read_auto_list_impl(listed, AUTO_MAX, 1);
+  n = auto_sequence_snapshot(listed, intervals);
+  if (n < 0) {
+    pthread_mutex_lock(&auto_mu);
+    boot_auto.phase = "error"; boot_auto.started = 0;
+    snprintf(boot_auto.message, sizeof(boot_auto.message), "Cannot read AutoPayload intervals; automatic sends blocked");
+    pthread_mutex_unlock(&auto_mu);
+    return;
+  }
   e = existing_names(listed, n, use, AUTO_MAX, "auto.list");
   evlog("info", "AutoPayload source=%s listed=%d runnable=%d delay=%dms",
         source, n, e, delay_ms);
@@ -159,7 +166,23 @@ static void run_headless_auto(const char *source) {
     pthread_mutex_unlock(&auto_mu);
     evlog(rc == SEND_OK ? "load" : "error", "AutoPayload %s: %s; rc=%d reply=%.100s; execution unconfirmed",
           listed[i], rc == SEND_OK ? "sent to elfldr" : "send failed", rc, emsg);
-    if (rc == SEND_OK && !auto_cancelled()) usleep(300000);
+    /* Start the interval only after the transport result. Never wait after
+     * the last item; values remain attached to filenames in profiles.json. */
+    if (i+1<n && intervals[i]>0 && !auto_cancelled()) {
+      pthread_mutex_lock(&auto_mu);
+      boot_auto.phase="interval";
+      boot_auto.deadline=mono_ms()+intervals[i];
+      if (auto_save_locked()) { pthread_mutex_unlock(&auto_mu); return; }
+      pthread_mutex_unlock(&auto_mu);
+      while (!auto_cancelled()) {
+        int64_t remaining;
+        pthread_mutex_lock(&auto_mu);
+        remaining=boot_auto.deadline-mono_ms();
+        pthread_mutex_unlock(&auto_mu);
+        if(remaining<=0)break;
+        usleep((unsigned int)(remaining>50?50:remaining)*1000);
+      }
+    }
   }
   auto_finish();
 }
@@ -206,7 +229,7 @@ static void handle_auto_cancel(int c, const char *qs, int is_post) {
     send_json_code(c, 409, "{\"ok\":false,\"message\":\"stale session\"}");
     return;
   }
-  if (!strcmp(boot_auto.phase, "preparing") || !strcmp(boot_auto.phase, "waiting") || !strcmp(boot_auto.phase, "loading"))
+  if (!strcmp(boot_auto.phase, "preparing") || !strcmp(boot_auto.phase, "waiting") || !strcmp(boot_auto.phase, "loading") || !strcmp(boot_auto.phase, "interval"))
     boot_auto.cancel = 1;
   boot_auto.deadline = 0;
   /* The worker will persist the final snapshot; an accepted cancellation

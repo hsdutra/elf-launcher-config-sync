@@ -15,7 +15,7 @@ fs.writeFileSync(out,`<!doctype html><meta charset="utf-8"><meta name="viewport"
 var LANG='pt',dark=false,clock=null,seq=0,state;
 var localStorage={getItem:function(){return null;},setItem:function(){}};
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
-function t(k,v){return LANG==='pt'?'Aguardar antes do carregamento… '+v.n+' s':'Waiting… '+v.n+' s';}
+function t(k,v){if(k==='autoPayload')return LANG==='ar'?'التشغيل التلقائي':LANG==='ja'?'自動ペイロード':'AutoPayload';v=v||{};return LANG==='pt'?'Aguardar antes do carregamento… '+v.n+' s':'Waiting… '+v.n+' s';}
 function isConsoleHost(){return false;}
 function showHome(){}
 function showFolder(){alert(state.items.map(function(x){return x.name+': '+x.status+(x.status==='error'?' (falha simulada)':'');}).join('\\n'));}
@@ -25,7 +25,7 @@ function fetch(url){
 }
 ${js}
 document.getElementById('bootopen').onclick=bootDismiss;
-document.getElementById('bootlog').onclick=function(){bootDismiss();showFolder();};
+document.getElementById('bootlog').onclick=function(){var list=document.getElementById('bootitems');list.className=list.className==='details'?'':'details';};
 document.getElementById('autobannercancel').onclick=padCancelAuto;
 document.addEventListener('keydown',function(e){if(e.key==='Escape')padCancelAuto();});
 function demo(n,fail){

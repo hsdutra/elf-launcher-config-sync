@@ -35,6 +35,12 @@ static int settings_auto_delay_ms(void) { return delay; }
 static int read_auto_list_impl(char names[][AUTO_NAME_MAX],int cap,int diagnose) {
   (void)cap;(void)diagnose; for(int i=0;i<count;i++)snprintf(names[i],AUTO_NAME_MAX,"payload-%d.elf",i);return count;
 }
+static int interval_ms[AUTO_MAX];
+static int mutate_intervals;
+static int auto_sequence_snapshot(char names[][AUTO_NAME_MAX],int *ms) {
+  memcpy(ms,interval_ms,sizeof(interval_ms));
+  return read_auto_list_impl(names,AUTO_MAX,1);
+}
 static int existing_names(char a[][AUTO_NAME_MAX],int n,char b[][AUTO_NAME_MAX],int cap,const char *s) {(void)a;(void)b;(void)cap;(void)s;return n;}
 static int auto_disk_path_reason(const char *name,char *path,size_t len,const char **why) {
   int i=-1;sscanf(name,"payload-%d.elf",&i);if(i==missing_at){*why="file missing";return -1;}snprintf(path,len,"%s",name);return 0;
@@ -53,6 +59,7 @@ static void qget(const char *qs,const char *key,char *out,size_t len) {(void)key
 #undef rename
 static int elfldr_send_path(const char *path,const char *args,char *msg,size_t len,int ms) {
   (void)args;(void)ms;int i;sscanf(path,"payload-%d.elf",&i);if(!sends)first_send_ms=mono_ms();sends++;
+  if(mutate_intervals)memset(interval_ms,0,sizeof(interval_ms));
   handle_boot_auto(0);assert(strstr(response,"\"done\":false") && strstr(response,"\"phase\":\"loading\""));
   handle_auto_status(0);assert(strstr(response,"\"done\":false") && strstr(response,"\"phase\":\"loading\""));
   if(cancel_in_send){char qs[100];snprintf(qs,sizeof(qs),"session=%s",boot_auto.session);handle_auto_cancel(0,qs,1);}
@@ -65,6 +72,8 @@ static void reset(int n) {
   memset(auto_boot_id,0,sizeof(auto_boot_id));
   sends=delay=cancel_in_send=marker_error=send_busy=journal_error=0;count=n;fail_at=missing_at=-1;volatile_mount=1;
   first_send_ms=0;
+  memset(interval_ms,0,sizeof(interval_ms));
+  mutate_intervals=0;
 }
 static void restart_server(void) {
   memset(&boot_auto,0,sizeof(boot_auto));boot_auto.phase="idle";
@@ -87,6 +96,30 @@ static void *claim_thread(void *arg) {int *wins=arg;if(auto_claim())__sync_fetch
 static void *run_thread(void *arg) {(void)arg;run_headless_auto("test");return NULL;}
 static void cancel_current(void) {char qs[100];snprintf(qs,sizeof(qs),"session=%s",boot_auto.session);handle_auto_cancel(0,qs,1);assert(code==200);}
 int main(void) {
+  /* Production worker: real monotonic waits with simulated transports. */
+  reset(3);interval_ms[0]=1000;interval_ms[1]=1000;interval_ms[2]=300000;
+  mutate_intervals=1; /* Edits during a run affect only the next snapshot. */
+  assert(auto_claim());int64_t interval_began=mono_ms();run_headless_auto("intervals");
+  assert(sends==3 && mono_ms()-interval_began>=2000 && mono_ms()-interval_began<3500);
+  /* During an interval cancellation prevents every following admission. */
+  reset(3);interval_ms[0]=10000;assert(auto_claim());pthread_t interval_worker;
+  pthread_create(&interval_worker,NULL,run_thread,NULL);
+  for(int tries=0;tries<200;tries++) {
+    pthread_mutex_lock(&auto_mu);int waiting=!strcmp(boot_auto.phase,"interval");pthread_mutex_unlock(&auto_mu);
+    if(waiting)break;
+    usleep(10000);
+  }
+  handle_auto_status(0);assert(strstr(response,"\"phase\":\"interval\""));
+  cancel_current();pthread_join(interval_worker,NULL);assert(sends==1);
+  assert(!strcmp(boot_auto.phase,"cancelled") && boot_auto.completed==3);
+  reset(3);interval_ms[1]=10000;assert(auto_claim());
+  pthread_create(&interval_worker,NULL,run_thread,NULL);
+  for(int tries=0;tries<200;tries++) {
+    pthread_mutex_lock(&auto_mu);int waiting=!strcmp(boot_auto.phase,"interval");pthread_mutex_unlock(&auto_mu);
+    if(waiting)break;
+    usleep(10000);
+  }
+  cancel_current();pthread_join(interval_worker,NULL);assert(sends==2);
   int sizes[]={0,1,3,12,64};
   for(unsigned int s=0;s<sizeof(sizes)/sizeof(sizes[0]);s++){
     reset(sizes[s]);assert(auto_claim());run_headless_auto("test");

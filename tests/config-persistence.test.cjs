@@ -381,7 +381,8 @@ test('NanoDNS row stays confirmed until ACK, persists four names, then removes o
   const original=ctx.fetch;let release,posted;
   ctx.fetch=(url,request)=>request&&request.method==='POST'?new Promise(resolve=>{posted={url,request};release=()=>original(url,request).then(resolve);}):original(url,request);
   const attrs={'data-name':'nanodns.elf'},tag={textContent:''};
-  const row={parentNode:{getAttribute:k=>attrs[k]},className:'elf nom autorow',querySelector:()=>tag,getAttribute:k=>attrs[k],setAttribute:(k,v)=>attrs[k]=v,removeAttribute:k=>delete attrs[k]};
+  const select={setAttribute:(k,v)=>{tag[k]=v;}};
+  const row={parentNode:{getAttribute:k=>attrs[k]},className:'elf nom autorow',querySelector:selector=>selector==='.auto-select'?select:tag,getAttribute:k=>attrs[k],setAttribute:(k,v)=>attrs[k]=v,removeAttribute:k=>delete attrs[k]};
   ctx.autoRowToggle(row);
   assert.equal(ctx.AUTO_NAMES.length,3);assert.equal(ctx.PROF.list.HSDUTRA.length,3);
   assert.ok(!row.className.includes('ison'));assert.equal(attrs['aria-busy'],'true');
@@ -389,6 +390,7 @@ test('NanoDNS row stays confirmed until ACK, persists four names, then removes o
   assert.deepEqual(JSON.parse(posted.request.headers['X-Auto-List']),activeNames.concat('nanodns.elf'));
   release();await new Promise(setImmediate);
   assert.equal(ctx.AUTO_NAMES.length,4);assert.equal(c.server.auto.names.length,4);assert.ok(row.className.includes('ison'));
+  assert.equal(tag['aria-checked'],'true');
   ctx.fetch=original;
   assert.equal(await loaded(cb=>ctx.setAuto('nanodns.elf',false,cb)),true);
   assert.deepEqual(c.server.auto.names,activeNames);

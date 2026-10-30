@@ -3717,6 +3717,7 @@ static int read_file_bounded(const char *path, size_t max_size, char **data,
 static int parse_auto_names_array(const char *body, size_t body_n,
                                   char names[][AUTO_NAME_MAX], int *count,
                                   const char **why);
+static int intervals_validate(const char *body, size_t len);
 static int profiles_match_auto(const char *body, size_t len,
                                char names[][AUTO_NAME_MAX], int count);
 static void handle_profiles_read(int c) {
@@ -3819,7 +3820,7 @@ static void handle_profiles(int c, int is_post, const char *req, size_t hlen, si
       fs_reply_bad(c, 400, why);
       return;
     }
-    if (!profiles_match_auto(body, n, names, auto_count)) {
+    if (!intervals_validate(body, n) || !profiles_match_auto(body, n, names, auto_count)) {
       free(body);
       fs_reply_bad(c, 400, "active profile must match the ordered AutoPayload list");
       return;
@@ -4425,6 +4426,96 @@ static int profile_active_value(const char *body, size_t len, const char **out, 
     if (p < end && *p == '}') return found == 1;
     return 0;
   }
+}
+
+
+/* Optional profile -> filename -> integer seconds. Old profiles imply zero.
+ * Compare serialized keys so escaped profile names retain their identity. */
+static int interval_object(const char *obj, size_t len, int depth,
+                           const char *wanted, size_t wanted_n,
+                           const char **out, size_t *out_n) {
+  const char *p=obj, *end=obj+len;
+  if (len<2 || *p++!='{') return -1;
+  for (;;) {
+    const char *key, *v; size_t kn, vn;
+    json_skip_space(&p);
+    if (p<end && *p=='}') { p++; json_skip_space(&p); return p==end?0:-1; }
+    key=p;
+    if (json_skip_string(&p,end)) return -1;
+    kn=(size_t)(p-key); json_skip_space(&p);
+    if (p>=end || *p++!=':') return -1;
+    json_skip_space(&p); v=p;
+    if (json_skip_value(&p,end)) return -1;
+    vn=(size_t)(p-v);
+    if (depth) { if (interval_object(v,vn,0,NULL,0,NULL,NULL)) return -1; }
+    else {
+      size_t i; unsigned seconds=0;
+      if (!vn || vn>3 || (vn>1 && v[0]=='0')) return -1;
+      for (i=0;i<vn;i++) { if (v[i]<'0'||v[i]>'9') return -1; seconds=seconds*10+(v[i]-'0'); }
+      if (seconds>300) return -1;
+    }
+    if (wanted && kn==wanted_n && !memcmp(key,wanted,kn)) {
+      if (*out) return -1;
+      *out=v; *out_n=vn;
+    }
+    json_skip_space(&p);
+    if (p<end && *p==',') { p++; json_skip_space(&p); if(p>=end||*p=='}')return -1; continue; }
+    if (p>=end || *p!='}') return -1;
+  }
+}
+static int intervals_validate(const char *body, size_t len) {
+  const char *p=body, *end=body+len, *v; size_t n; int found=0;
+  /* Validate the root and distinguish an absent optional field from duplicate
+   * fields. A legacy profile may itself be named "intervals". */
+  if (json_top_field(body,len,"active",&v,&n)) return 0;
+  json_skip_space(&p);
+  if(p>=end||*p++!='{')return 0;
+  for (;;) {
+    const char *key; size_t kn;
+    json_skip_space(&p);
+    if(p>=end)return 0;
+    if(*p=='}')return 1;
+    key=p;
+    if(json_skip_string(&p,end))return 0;
+    kn=(size_t)(p-key);json_skip_space(&p);
+    if(p>=end||*p++!=':')return 0;
+    json_skip_space(&p);v=p;
+    if(json_skip_value(&p,end))return 0;
+    if(kn==11&&!memcmp(key,"\"intervals\"",11)) {
+      if(found++ || interval_object(v,(size_t)(p-v),1,NULL,0,NULL,NULL))return 0;
+    }
+    json_skip_space(&p);
+    if(p<end&&*p==',')p++;
+    else if(p>=end||*p!='}')return 0;
+  }
+}
+static int profile_intervals(const char *body, size_t len,
+                              char names[][AUTO_NAME_MAX], int count, int *ms) {
+  const char *all, *active, *map=NULL; size_t an, active_n, mn=0; int i;
+  if (!intervals_validate(body,len)) return -1;
+  if (json_top_field(body,len,"intervals",&all,&an)) return 0;
+  if (json_top_field(body,len,"active",&active,&active_n) ||
+      interval_object(all,an,1,active,active_n,&map,&mn)) return -1;
+  if (!map) return 0;
+  for(i=0;i<count;i++) {
+    char key[AUTO_NAME_MAX+3]; const char *v=NULL; size_t vn=0;
+    snprintf(key,sizeof(key),"\"%s\"",names[i]);
+    if(interval_object(map,mn,0,key,strlen(key),&v,&vn))return -1;
+    if(v)ms[i]=atoi(v)*1000;
+  }
+  return 0;
+}
+/* Caller holds profiles_mx then auto_list_mx: one immutable boot snapshot. */
+static int auto_sequence_snapshot(char names[][AUTO_NAME_MAX], int *ms) {
+  char *body=NULL; size_t len=0; int exists=0, n, rc;
+  pthread_mutex_lock(&profiles_mx); pthread_mutex_lock(&auto_list_mx);
+  n=read_auto_list_impl(names,AUTO_MAX,1);
+  memset(ms,0,sizeof(int)*AUTO_MAX);
+  rc=read_file_bounded(PROFILES_FILE,65536,&body,&len,&exists);
+  if (!rc && exists) rc=profile_intervals(body,len,names,n,ms);
+  free(body);
+  pthread_mutex_unlock(&auto_list_mx); pthread_mutex_unlock(&profiles_mx);
+  return rc?-1:n;
 }
 
 static int profiles_match_auto(const char *body, size_t len,
