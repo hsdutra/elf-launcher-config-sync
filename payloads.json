@@ -57,19 +57,19 @@
       "icon": "https://raw.githubusercontent.com/X-F1REBALL-X/elf-launcher/ddbc4f231d44d2ef98630a656f39a5ddfca4634d/icons/payloads/webkit-autoloader-installer.png",
       "filename": "webkit-autoloader-installer.elf",
       "path": "hen/webkit-autoloader-installer.elf",
-      "url": "https://github.com/itsPLK/ps5-webkit-autoloader/releases/download/v0.8.2/webkit-autoloader-installer_v0.8.2.elf",
+      "url": "https://github.com/itsPLK/ps5-webkit-autoloader/releases/download/v0.8.3/webkit-autoloader-installer_v0.8.3.elf",
       "description": "Installs the WK-AutoLoader tile on the home screen.",
-      "version": "v0.8.2",
+      "version": "v0.8.3",
       "category": "Loader",
       "author": "itsPLK",
       "size": 1885440,
-      "checksum": "1c415bc124944c85b86a4751006b98010b977f142142d67306d13804899bad54",
-      "source_direct": "https://github.com/itsPLK/ps5-webkit-autoloader/releases/download/v0.8.2/webkit-autoloader-installer_v0.8.2.elf",
+      "checksum": "f4b0dee9af572ea1cb77aaf1e6fc5bf8ef520fc0a0a30753dd94a5cbdc04dd8e",
+      "source_direct": "https://github.com/itsPLK/ps5-webkit-autoloader/releases/download/v0.8.3/webkit-autoloader-installer_v0.8.3.elf",
       "github_latest": {
         "repo": "itsPLK/ps5-webkit-autoloader",
         "asset": "^webkit-autoloader-installer(_v[0-9.]+)?\\.elf$"
       },
-      "sha256": "1c415bc124944c85b86a4751006b98010b977f142142d67306d13804899bad54"
+      "sha256": "f4b0dee9af572ea1cb77aaf1e6fc5bf8ef520fc0a0a30753dd94a5cbdc04dd8e"
     },
     {
       "name": "wk-autoloader.elf",
@@ -412,18 +412,18 @@
       "icon": "https://raw.githubusercontent.com/X-F1REBALL-X/elf-launcher/5c3fa0ea5b856595bfc849c7b11822edf96708af/icons/categories/mods.png",
       "filename": "Common_FPS_PS5.elf",
       "path": "tools/Common_FPS_PS5.elf",
-      "url": "https://github.com/porhe911/Common-FPS-for-PS5/releases/download/v1.2.3/Common_FPS_PS5_v1.2.3.elf",
+      "url": "https://github.com/porhe911/Common-FPS-for-PS5/releases/download/v1.2.5/Common_FPS_PS5_v1.2.5.elf",
       "description": "Draws an FPS counter over the game.",
-      "version": "v1.2.3",
+      "version": "v1.2.5",
       "category": "Mods & Saves",
       "author": "porhe911",
-      "size": 1322000,
-      "checksum": "bb74aa448952e9af4fb001f256f48b3b15fdedff88c2dec472ee9d16b20dbed5",
+      "size": 1321592,
+      "checksum": "5aac58f0f705909aec773f74cbcbec8d56a517d8199a67ca46f205b2c83a5da6",
       "github_latest": {
         "repo": "porhe911/Common-FPS-for-PS5",
         "asset": "^Common_FPS_PS5(_v[0-9.]+)?\\.elf$"
       },
-      "sha256": "bb74aa448952e9af4fb001f256f48b3b15fdedff88c2dec472ee9d16b20dbed5"
+      "sha256": "5aac58f0f705909aec773f74cbcbec8d56a517d8199a67ca46f205b2c83a5da6"
     },
     {
       "name": "patch-bundle-loader-prospero.elf",
@@ -448,37 +448,37 @@
       "icon": "https://raw.githubusercontent.com/X-F1REBALL-X/elf-launcher/ddbc4f231d44d2ef98630a656f39a5ddfca4634d/icons/payloads/kura-loader-ps5.png",
       "filename": "kura-loader-ps5.elf",
       "path": "apps/kura-loader-ps5.elf",
-      "url": "https://github.com/NookieAI/kura/releases/download/v1.6.51/kura-loader-ps5.elf",
+      "url": "https://github.com/NookieAI/kura/releases/download/v1.6.53/kura-loader-ps5.elf",
       "description": "Console side of Kura. Receives installs from the Kura app.",
-      "version": "v1.6.51",
+      "version": "v1.6.53",
       "category": "Files",
       "author": "NookieAI",
-      "size": 11878560,
-      "checksum": "57f96e4ad256a53ca812129d0ed7f3e104afb7088d0d4b24876dff78050a4547",
+      "size": 12125136,
+      "checksum": "c3bfb1db0f1fda7fe640e95711d78ae2cf9e94efa12742b5fc19c660ec43d627",
       "github_latest": {
         "repo": "NookieAI/kura",
         "asset": "^kura-loader-ps5\\.elf$"
       },
-      "sha256": "57f96e4ad256a53ca812129d0ed7f3e104afb7088d0d4b24876dff78050a4547"
+      "sha256": "c3bfb1db0f1fda7fe640e95711d78ae2cf9e94efa12742b5fc19c660ec43d627"
     },
     {
       "name": "ps5upload.elf",
       "icon": "https://raw.githubusercontent.com/phantomptr/ps5upload/60bb7d2a21d1c0ccc2ad64709c7d7fbe8e52cba4/client/icons/linux/icon_256x256.png",
       "filename": "ps5upload.elf",
       "path": "apps/ps5upload.elf",
-      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.13/ps5upload-12.6.13.elf",
+      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.16/ps5upload-12.6.16.elf",
       "description": "Fast LAN transfer, PKG install, image mount, files, and payload send.",
-      "version": "v12.6.13",
+      "version": "v12.6.16",
       "category": "Files",
       "author": "phantomptr",
-      "size": 12122632,
-      "checksum": "83b0222253285e3a95db389caaffb3063ea659a3940e7f95c70f5568f887365e",
-      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.13/ps5upload-12.6.13.elf",
+      "size": 12172192,
+      "checksum": "e02f0251c60e3de979e99b37b2f5276f7887a535223f78f35daf73735cea6576",
+      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.16/ps5upload-12.6.16.elf",
       "github_latest": {
         "repo": "phantomptr/ps5upload",
         "asset": "^ps5upload(-[0-9.]+)?\\.elf$"
       },
-      "sha256": "83b0222253285e3a95db389caaffb3063ea659a3940e7f95c70f5568f887365e"
+      "sha256": "e02f0251c60e3de979e99b37b2f5276f7887a535223f78f35daf73735cea6576"
     },
     {
       "name": "BFpilot.elf",
