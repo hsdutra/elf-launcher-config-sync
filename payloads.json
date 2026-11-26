@@ -412,18 +412,18 @@
       "icon": "https://raw.githubusercontent.com/X-F1REBALL-X/elf-launcher/5c3fa0ea5b856595bfc849c7b11822edf96708af/icons/categories/mods.png",
       "filename": "Common_FPS_PS5.elf",
       "path": "tools/Common_FPS_PS5.elf",
-      "url": "https://github.com/porhe911/Common-FPS-for-PS5/releases/download/v1.2.5/Common_FPS_PS5_v1.2.5.elf",
+      "url": "https://github.com/porhe911/Common-FPS-for-PS5/releases/download/v1.2.6/Common_FPS_PS5_v1.2.6.elf",
       "description": "Draws an FPS counter over the game.",
-      "version": "v1.2.5",
+      "version": "v1.2.6",
       "category": "Mods & Saves",
       "author": "porhe911",
       "size": 1321592,
-      "checksum": "5aac58f0f705909aec773f74cbcbec8d56a517d8199a67ca46f205b2c83a5da6",
+      "checksum": "9b647d6f38d395beaf613c1311d41bda72216cfc381fb17ec62ed4b6943eef5a",
       "github_latest": {
         "repo": "porhe911/Common-FPS-for-PS5",
         "asset": "^Common_FPS_PS5(_v[0-9.]+)?\\.elf$"
       },
-      "sha256": "5aac58f0f705909aec773f74cbcbec8d56a517d8199a67ca46f205b2c83a5da6"
+      "sha256": "9b647d6f38d395beaf613c1311d41bda72216cfc381fb17ec62ed4b6943eef5a"
     },
     {
       "name": "patch-bundle-loader-prospero.elf",
@@ -466,19 +466,19 @@
       "icon": "https://raw.githubusercontent.com/phantomptr/ps5upload/60bb7d2a21d1c0ccc2ad64709c7d7fbe8e52cba4/client/icons/linux/icon_256x256.png",
       "filename": "ps5upload.elf",
       "path": "apps/ps5upload.elf",
-      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.29/ps5upload-12.6.29.elf",
+      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.31/ps5upload-12.6.31.elf",
       "description": "Fast LAN transfer, PKG install, image mount, files, and payload send.",
-      "version": "v12.6.29",
+      "version": "v12.6.31",
       "category": "Files",
       "author": "phantomptr",
-      "size": 12205680,
-      "checksum": "2f9c8f3810629de0d8add238bc47b99801374fae2d0a2f83ddcc013729bb706b",
-      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.29/ps5upload-12.6.29.elf",
+      "size": 12246144,
+      "checksum": "57bc3a0df33226c7f37c9d870aa21ec549dedb2414c09e8c47e647d14f125e45",
+      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.31/ps5upload-12.6.31.elf",
       "github_latest": {
         "repo": "phantomptr/ps5upload",
         "asset": "^ps5upload(-[0-9.]+)?\\.elf$"
       },
-      "sha256": "2f9c8f3810629de0d8add238bc47b99801374fae2d0a2f83ddcc013729bb706b"
+      "sha256": "57bc3a0df33226c7f37c9d870aa21ec549dedb2414c09e8c47e647d14f125e45"
     },
     {
       "name": "BFpilot.elf",
@@ -1363,15 +1363,15 @@
       "icon": "https://raw.githubusercontent.com/strongt1me/ps5-cooling-system-center-pro/87705e716e62a98d1134d02068aa29b9424ffb4b/tile/sce_sys/icon0.png",
       "filename": "PS5_Cooling_System_Center.elf",
       "path": "system/PS5_Cooling_System_Center.elf",
-      "url": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.95.1/PS5_Cooling_System_Center_v1.95.1.elf",
+      "url": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.96.1/PS5_Cooling_System_Center_v1.96.1.elf",
       "description": "Fan control and temperature monitor with a web page.",
-      "version": "v1.95.1",
+      "version": "v1.96.1",
       "category": "System",
       "author": "strongt1me",
-      "size": 24550880,
-      "checksum": "12d6cdc22f5b8e2c38158e0cde91c6838fdb48b6e84e3af68d8cbeabb1a4cbe1",
-      "sha256": "12d6cdc22f5b8e2c38158e0cde91c6838fdb48b6e84e3af68d8cbeabb1a4cbe1",
-      "source_direct": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.95.1/PS5_Cooling_System_Center_v1.95.1.elf",
+      "size": 24763872,
+      "checksum": "09339d8259e053344ce673abb82fd04026477c0948613927cad5d007a506901f",
+      "sha256": "09339d8259e053344ce673abb82fd04026477c0948613927cad5d007a506901f",
+      "source_direct": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.96.1/PS5_Cooling_System_Center_v1.96.1.elf",
       "github_latest": {
         "repo": "strongt1me/ps5-cooling-system-center-pro",
         "asset": "^PS5_Cooling_System_Center(_v[0-9.]+)?\\.elf$"
