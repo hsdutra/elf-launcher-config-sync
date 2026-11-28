@@ -466,19 +466,19 @@
       "icon": "https://raw.githubusercontent.com/phantomptr/ps5upload/60bb7d2a21d1c0ccc2ad64709c7d7fbe8e52cba4/client/icons/linux/icon_256x256.png",
       "filename": "ps5upload.elf",
       "path": "apps/ps5upload.elf",
-      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.40/ps5upload-12.6.40.elf",
+      "url": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.46/ps5upload-12.6.46.elf",
       "description": "Fast LAN transfer, PKG install, image mount, files, and payload send.",
-      "version": "v12.6.40",
+      "version": "v12.6.46",
       "category": "Files",
       "author": "phantomptr",
-      "size": 12407016,
-      "checksum": "d43d24fbe3030466168838bbd9040978cb1c235240b9b0ca4037ff04b81f2c0a",
-      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.40/ps5upload-12.6.40.elf",
+      "size": 12522680,
+      "checksum": "d762e1e3c65f36ed2d1cacce129a612c4777755684560b600a1e216dd445813a",
+      "source_direct": "https://github.com/phantomptr/ps5upload/releases/download/v12.6.46/ps5upload-12.6.46.elf",
       "github_latest": {
         "repo": "phantomptr/ps5upload",
         "asset": "^ps5upload(-[0-9.]+)?\\.elf$"
       },
-      "sha256": "d43d24fbe3030466168838bbd9040978cb1c235240b9b0ca4037ff04b81f2c0a"
+      "sha256": "d762e1e3c65f36ed2d1cacce129a612c4777755684560b600a1e216dd445813a"
     },
     {
       "name": "BFpilot.elf",
@@ -1363,15 +1363,15 @@
       "icon": "https://raw.githubusercontent.com/strongt1me/ps5-cooling-system-center-pro/87705e716e62a98d1134d02068aa29b9424ffb4b/tile/sce_sys/icon0.png",
       "filename": "PS5_Cooling_System_Center.elf",
       "path": "system/PS5_Cooling_System_Center.elf",
-      "url": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.97.0/PS5_Cooling_System_Center_v1.97.0.elf",
+      "url": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.98.0/PS5_Cooling_System_Center_v1.98.0.elf",
       "description": "Fan control and temperature monitor with a web page.",
-      "version": "v1.97.0",
+      "version": "v1.98.0",
       "category": "System",
       "author": "strongt1me",
-      "size": 24976864,
-      "checksum": "ac56b97a8857ce86241c3cd01fe12c2d2fbf483a6f426b2de1d7a473d2558271",
-      "sha256": "ac56b97a8857ce86241c3cd01fe12c2d2fbf483a6f426b2de1d7a473d2558271",
-      "source_direct": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.97.0/PS5_Cooling_System_Center_v1.97.0.elf",
+      "size": 25173472,
+      "checksum": "9d8339f2231ca17b4e05c4e58e19bc88f1ad7355d7c6b1dbfd4903ee785ea4eb",
+      "sha256": "9d8339f2231ca17b4e05c4e58e19bc88f1ad7355d7c6b1dbfd4903ee785ea4eb",
+      "source_direct": "https://github.com/strongt1me/ps5-cooling-system-center-pro/releases/download/v1.98.0/PS5_Cooling_System_Center_v1.98.0.elf",
       "github_latest": {
         "repo": "strongt1me/ps5-cooling-system-center-pro",
         "asset": "^PS5_Cooling_System_Center(_v[0-9.]+)?\\.elf$"
